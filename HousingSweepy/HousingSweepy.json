@@ -1,14 +1,17 @@
 {
-  "Author": "Catphinaud",
-  "Name": "HousingSweepy",
-  "Punchline": "Waiting",
-  "Description": "None",
-  "ApplicableVersion": "any",
-  "Tags": [
-    "Housing",
-    "Guest"
-  ],
-  "InternalName": "HousingSweepy",
-  "RepoUrl": "https://github.com/Catphinaud/HousingSweepy",
-  "DalamudApiLevel": 13
+    "Author": "Catphinaud",
+    "Name": "HousingSweepy",
+    "Punchline": "Actual sweeping for once",
+    "Description": "Sweepy the actual housing wards for medium / large houses",
+    "ApplicableVersion": "any",
+    "Tags": [
+        "housing",
+        "convenience",
+        "Automation"
+    ],
+    "IconUrl": "https://raw.githubusercontent.com/Catphinaud/HousingSweepy/main/images/icon.png",
+
+    "InternalName": "HousingSweepy",
+    "RepoUrl": "https://github.com/Catphinaud/HousingSweepy",
+    "DalamudApiLevel": 13
 }
