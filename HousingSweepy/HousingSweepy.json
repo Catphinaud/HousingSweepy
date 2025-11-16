@@ -1,0 +1,14 @@
+{
+  "Author": "Catphinaud",
+  "Name": "HousingSweepy",
+  "Punchline": "Waiting",
+  "Description": "None",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "Housing",
+    "Guest"
+  ],
+  "InternalName": "HousingSweepy",
+  "RepoUrl": "https://github.com/Catphinaud/HousingSweepy",
+  "DalamudApiLevel": 13
+}

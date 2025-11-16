@@ -1,0 +1,15 @@
+﻿* text=auto
+
+###############################################################################
+# Set default behavior for command prompt diff.
+#
+# This is need for earlier builds of msysgit that does not have it on by
+# default for csharp files.
+# Note: This is only used by command line
+###############################################################################
+*.cs     diff=csharp eol=lf
+*.sln       merge=binary
+*.csproj    merge=binary
+*.vcxproj   merge=binary
+*.jpg   binary
+*.png   binary
