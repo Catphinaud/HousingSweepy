@@ -140,8 +140,8 @@ public sealed class Plugin : IDalamudPlugin
     // Maybe one should remove this but I had it for debugging but removed the code in it...
     public void Commit()
     {
-        var territoryId = Player.Territory;
-        var worldId = Player.CurrentWorldId;
+        var territoryId = (uint) Svc.ClientState.TerritoryType;
+        var worldId = Svc.PlayerState.CurrentWorld.RowId;
 
         var key = new WordTerritory(worldId, territoryId);
 
