@@ -43,13 +43,16 @@ public sealed class Plugin : IDalamudPlugin
 
     public WordTerritory? LastCommittedZoneAndWorld;
 
-    public Dictionary<int, List<HouseInfoEntry>> SeenHouses = new();
+    public Dictionary<uint, Dictionary<int, List<HouseInfoEntry>>> SeenHousesByTerritory = new();
 
     public bool StopNext;
 
-    public List<WardInfo> Wards = new();
+    public Dictionary<uint, List<WardInfo>> WardsByTerritory = new();
 
     public Queue<int> WardsToScan = new();
+
+    private readonly List<ResidentialTerritory> residentialTerritories = new();
+    public IReadOnlyList<ResidentialTerritory> ResidentialTerritories => residentialTerritories;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -67,6 +70,8 @@ public sealed class Plugin : IDalamudPlugin
             ShowDebug = true,
             TimeLimitMS = 15000
         });
+
+        InitializeResidentialTerritories();
 
         wardObserver = new WardObserver(this);
         _windowSystem = new WindowSystem("HousingSweepy");
@@ -117,12 +122,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public void ResetSeenHouses()
     {
-        SeenHouses.Clear();
-
-        // Reset per-ward seen state so subsequent scans will re-scan wards
-        foreach (var ward in Wards) {
-            ward.ResetSeen();
-        }
+        SeenHousesByTerritory.Clear();
+        WardsByTerritory.Clear();
 
         try {
             wardObserver?.ResetSweep();
@@ -140,23 +141,27 @@ public sealed class Plugin : IDalamudPlugin
     // Maybe one should remove this but I had it for debugging but removed the code in it...
     public void Commit()
     {
-        var territoryId = Player.Territory;
-        var worldId = Player.CurrentWorldId;
+        var territoryId = (uint) Svc.ClientState.TerritoryType;
+        var worldId = Svc.PlayerState.CurrentWorld.RowId;
 
         var key = new WordTerritory(worldId, territoryId);
 
         if (LastCommittedZoneAndWorld == null || !LastCommittedZoneAndWorld.Equals(key)) {
-            // Commit
+            if (LastCommittedZoneAndWorld != null && LastCommittedZoneAndWorld.WorldId != worldId) {
+                SeenHousesByTerritory.Clear();
+                WardsByTerritory.Clear();
+            }
+
             LastCommittedZoneAndWorld = key;
 
-            // Clear previous committed info for this zone/world
-
-            SeenHouses.Clear();
+            // Keep per-territory seen houses; update current key only.
         }
     }
 
     public void ScanForSeenHouses()
     {
+        var territoryId = (uint) Svc.ClientState.TerritoryType;
+        var wards = GetWardsForTerritory(territoryId);
         StopNext = false;
         IsScanningWards = false;
         TaskManager.Abort();
@@ -166,7 +171,7 @@ public sealed class Plugin : IDalamudPlugin
 
         for (var wardIndex = 0; wardIndex < 30; wardIndex++) {
             var wardNumber = wardIndex + 1;
-            var wardInfo = Wards.FirstOrDefault(w => w.WardNumber == wardNumber);
+            var wardInfo = wards.FirstOrDefault(w => w.WardNumber == wardNumber);
             if (wardInfo == null) {
                 QueueWardForScan(wardIndex);
             }
@@ -243,7 +248,8 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         // Check if we've already scanned this ward
-        var existingWard = Wards.FirstOrDefault(w => w.WardNumber == ward);
+        var territoryId = (uint) Svc.ClientState.TerritoryType;
+        var existingWard = GetWardsForTerritory(territoryId).FirstOrDefault(w => w.WardNumber == ward);
         if (existingWard != null && existingWard.HasBeenSeen()) {
             Svc.Log.Info($"Ward {ward} has already been scanned. Skipping.");
             return;
@@ -304,6 +310,59 @@ public sealed class Plugin : IDalamudPlugin
             if (other == null) return false;
 
             return WorldId == other.WorldId && TerritoryId == other.TerritoryId;
+        }
+    }
+
+    public readonly record struct ResidentialTerritory(uint TerritoryId, string TabLabel, string PlaceName);
+
+    public Dictionary<int, List<HouseInfoEntry>> GetSeenHousesForTerritory(uint territoryId)
+    {
+        if (!SeenHousesByTerritory.TryGetValue(territoryId, out var seen)) {
+            seen = new Dictionary<int, List<HouseInfoEntry>>();
+            SeenHousesByTerritory[territoryId] = seen;
+        }
+
+        return seen;
+    }
+
+    public List<WardInfo> GetWardsForTerritory(uint territoryId)
+    {
+        if (!WardsByTerritory.TryGetValue(territoryId, out var wards)) {
+            wards = new List<WardInfo>();
+            WardsByTerritory[territoryId] = wards;
+        }
+
+        return wards;
+    }
+
+    public bool HasAnySeenHouses()
+    {
+        foreach (var territory in SeenHousesByTerritory.Values) {
+            if (territory.Count > 0) return true;
+        }
+
+        return false;
+    }
+
+    private void InitializeResidentialTerritories()
+    {
+        var entries = new[]
+        {
+            new { TabLabel = "Ul'dah", PlaceName = "The Goblet" },
+            new { TabLabel = "Limsa", PlaceName = "Mist" },
+            new { TabLabel = "Gridania", PlaceName = "The Lavender Beds" },
+            new { TabLabel = "Foundation", PlaceName = "Empyreum" },
+            new { TabLabel = "Kugane", PlaceName = "Shirogane" }
+        };
+
+        foreach (var entry in entries) {
+            var territory = Territories.FirstOrDefault(t => t.PlaceName.ValueNullable?.Name.ToString() == entry.PlaceName);
+            if (territory.RowId == 0) {
+                Svc.Log.Warning($"Could not find territory for {entry.PlaceName}.");
+                continue;
+            }
+
+            residentialTerritories.Add(new ResidentialTerritory(territory.RowId, entry.TabLabel, entry.PlaceName));
         }
     }
 }

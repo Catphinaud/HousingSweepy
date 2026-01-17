@@ -138,10 +138,12 @@ public unsafe class WardObserver
             // add the ward to this sweep
             AddSweep(wardInfo);
 
+            var territoryId = (uint) wardInfo.LandIdent.TerritoryTypeId;
             var seen = new List<Plugin.HouseInfoEntry>();
-            if (plugin.SeenHouses.ContainsKey(wardInfo.LandIdent.WardNumber)) plugin.SeenHouses.Remove(wardInfo.LandIdent.WardNumber);
+            var seenByTerritory = plugin.GetSeenHousesForTerritory(territoryId);
+            if (seenByTerritory.ContainsKey(wardInfo.LandIdent.WardNumber)) seenByTerritory.Remove(wardInfo.LandIdent.WardNumber);
 
-            plugin.SeenHouses.Add(wardInfo.LandIdent.WardNumber, seen);
+            seenByTerritory.Add(wardInfo.LandIdent.WardNumber, seen);
 
             var houseList = seen;
             for (ushort i = 0; i < wardInfo.HouseInfoEntries.Length; i++) {
@@ -150,7 +152,12 @@ public unsafe class WardObserver
                     houseList.Add(new Plugin.HouseInfoEntry(i, houseInfoEntry.HousePrice, (houseInfoEntry.InfoFlags & HousingFlags.PlotOwned) != 0));
             }
 
-            var wi = plugin.Wards.Find(w => w.WardNumber == wardInfo.LandIdent.WardNumber);
+            var wards = plugin.GetWardsForTerritory(territoryId);
+            var wi = wards.Find(w => w.WardNumber == wardInfo.LandIdent.WardNumber);
+            if (wi == null) {
+                wi = new WardInfo(wardInfo.LandIdent.WardNumber);
+                wards.Add(wi);
+            }
 
             if (wi != null)
                 for (ushort i = 0; i < wardInfo.HouseInfoEntries.Length; i++) {
