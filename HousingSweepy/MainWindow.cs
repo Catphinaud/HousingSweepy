@@ -11,6 +11,13 @@ public class MainWindow : Window
     private bool showSmallHouses = true;
     private bool showMediumHouses = true;
     private bool showLargeHouses = true;
+    private bool filterFoundEnabled;
+    private bool filterFoundSmall = true;
+    private bool filterFoundMedium = true;
+    private bool filterFoundLarge = true;
+    private bool filterFoundSmallDraft = true;
+    private bool filterFoundMediumDraft = true;
+    private bool filterFoundLargeDraft = true;
 
     private OpenSource lastOpenSource = OpenSource.Unknown;
 
@@ -204,46 +211,162 @@ public class MainWindow : Window
         ImGui.Text("Wards");
         ImGui.SameLine();
         ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), selectedTerritory.TabLabel);
+        ImGui.SameLine();
+        DrawFoundFilterControl();
         ImGui.Separator();
 
-        var tableFlags = ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit;
-        if (!ImGui.BeginTable("WardListTable", 2, tableFlags)) return;
+        var contentWidth = ImGui.GetContentRegionAvail().X;
+        var wardCol = 130f;
+        var sizeCol = 48f;
+        var spacing = 10f;
+        var needed = wardCol + (sizeCol * 3) + (spacing * 3);
+        if (needed > contentWidth) {
+            var overflow = needed - contentWidth;
+            wardCol = MathF.Max(90f, wardCol - overflow);
+            sizeCol = MathF.Max(40f, sizeCol - overflow / 3f);
+        }
 
-        ImGui.TableSetupColumn("Ward", ImGuiTableColumnFlags.WidthFixed, 120);
-        ImGui.TableSetupColumn("Sizes", ImGuiTableColumnFlags.WidthFixed, 140);
-        ImGui.TableHeadersRow();
+        var startX = ImGui.GetCursorPosX();
+        var wardX = startX;
+        var smallX = wardX + wardCol + spacing;
+        var mediumX = smallX + sizeCol + spacing;
+        var largeX = mediumX + sizeCol + spacing;
 
-        var pillSize = new Vector2(36, 22);
+        ImGui.SetCursorPosX(wardX);
+        ImGui.Text("Ward");
+        ImGui.SameLine();
+        ImGui.SetCursorPosX(smallX);
+        ImGui.Text("S");
+        ImGui.SameLine();
+        ImGui.SetCursorPosX(mediumX);
+        ImGui.Text("M");
+        ImGui.SameLine();
+        ImGui.SetCursorPosX(largeX);
+        ImGui.Text("L");
+        if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            OpenFoundFilterPopup();
+        ImGui.Separator();
 
+        var rowHeight = 28f;
+        var drawList = ImGui.GetWindowDrawList();
         for (var ward = 0; ward <= 29; ward++) {
             var wardIndex = ward + 1;
             var seenWard = seenWards.ContainsKey(ward) && seenWards[ward].Count > 0;
 
             var wardHouses = seenWards.GetValueOrDefault(ward);
-            var hasSmall = seenWard && (wardHouses?.Exists(h => h is { TypeShort: "S", IsOwned: false }) ?? false);
-            var hasMedium = seenWard && (wardHouses?.Exists(h => h is { TypeShort: "M", IsOwned: false }) ?? false);
-            var hasLarge = seenWard && (wardHouses?.Exists(h => h is { TypeShort: "L", IsOwned: false }) ?? false);
+            var smallCount = seenWard ? (wardHouses?.Count(h => h is { TypeShort: "S", IsOwned: false }) ?? 0) : 0;
+            var mediumCount = seenWard ? (wardHouses?.Count(h => h is { TypeShort: "M", IsOwned: false }) ?? 0) : 0;
+            var largeCount = seenWard ? (wardHouses?.Count(h => h is { TypeShort: "L", IsOwned: false }) ?? 0) : 0;
 
-            ImGui.TableNextRow();
+            if (filterFoundEnabled) {
+                var matchSmall = filterFoundSmall && smallCount > 0;
+                var matchMedium = filterFoundMedium && mediumCount > 0;
+                var matchLarge = filterFoundLarge && largeCount > 0;
+                if (!(matchSmall || matchMedium || matchLarge)) continue;
+            }
 
-            ImGui.TableSetColumnIndex(0);
+            var rowTop = ImGui.GetCursorScreenPos();
+            var rowBottom = new Vector2(rowTop.X + contentWidth, rowTop.Y + rowHeight);
+
+            ImGui.InvisibleButton($"WardRow{wardIndex}", new Vector2(contentWidth, rowHeight));
             var isSelected = selectedWard == ward;
-            if (ImGui.Selectable($"Ward {wardIndex:00}##WardRow{wardIndex}", isSelected, ImGuiSelectableFlags.SpanAllColumns, new Vector2(0, 26))) {
+            var isHovered = ImGui.IsItemHovered();
+            if (ImGui.IsItemClicked()) {
                 if (selectedWard != ward) {
                     SetSelectedWard(selectedTerritoryId, ward);
                     if (plugin is { IsScanningWards: false, StopNext: false }) plugin.OpenHouseListForWard(ward);
                 }
             }
 
-            ImGui.TableSetColumnIndex(1);
-            DrawSizePill("S", hasSmall, new Vector4(0.12f, 0.58f, 0.95f, 1.0f), pillSize);
-            ImGui.SameLine();
-            DrawSizePill("M", hasMedium, new Vector4(0.40f, 0.75f, 0.25f, 1.0f), pillSize);
-            ImGui.SameLine();
-            DrawSizePill("L", hasLarge, new Vector4(0.75f, 0.28f, 0.90f, 1.0f), pillSize);
+            var rowColor = isSelected
+                ? new Vector4(0.23f, 0.40f, 0.55f, 0.85f)
+                : isHovered ? new Vector4(0.20f, 0.20f, 0.24f, 0.8f) : new Vector4(0f, 0f, 0f, 0f);
+            if (rowColor.W > 0f)
+                drawList.AddRectFilled(rowTop, rowBottom, ImGui.GetColorU32(rowColor), 6f);
+
+            var textColor = isSelected ? new Vector4(1f, 1f, 1f, 1f) : new Vector4(0.86f, 0.88f, 0.92f, 1f);
+            var textPos = new Vector2(rowTop.X + 8, rowTop.Y + 6);
+            drawList.AddText(textPos, ImGui.GetColorU32(textColor), $"Ward {wardIndex:00}");
+
+
+            var pillY = rowTop.Y + 4;
+            DrawCountPill(drawList, new Vector2(rowTop.X + (smallX - startX), pillY), new Vector2(sizeCol, 20), smallCount, seenWard,
+                new Vector4(0.12f, 0.58f, 0.95f, 1.0f));
+            DrawCountPill(drawList, new Vector2(rowTop.X + (mediumX - startX), pillY), new Vector2(sizeCol, 20), mediumCount, seenWard,
+                new Vector4(0.40f, 0.75f, 0.25f, 1.0f));
+            DrawCountPill(drawList, new Vector2(rowTop.X + (largeX - startX), pillY), new Vector2(sizeCol, 20), largeCount, seenWard,
+                new Vector4(0.75f, 0.28f, 0.90f, 1.0f));
+        }
+    }
+
+    private void DrawFoundFilterControl()
+    {
+        ImGui.SameLine();
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 6f);
+
+        var buttonSize = new Vector2(96, 24);
+        var isActive = filterFoundEnabled;
+        var baseColor = isActive ? new Vector4(0.20f, 0.50f, 0.70f, 1.0f) : new Vector4(0.20f, 0.20f, 0.24f, 1.0f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, baseColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered,
+            new Vector4(MathF.Min(baseColor.X + 0.08f, 1f), MathF.Min(baseColor.Y + 0.08f, 1f), MathF.Min(baseColor.Z + 0.08f, 1f), 1f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive,
+            new Vector4(MathF.Max(baseColor.X - 0.06f, 0f), MathF.Max(baseColor.Y - 0.06f, 0f), MathF.Max(baseColor.Z - 0.06f, 0f), 1f));
+
+        if (ImGui.Button("Found", buttonSize)) {
+            filterFoundEnabled = !filterFoundEnabled;
         }
 
-        ImGui.EndTable();
+        ImGui.PopStyleColor(3);
+
+        ImGui.SameLine();
+        if (ImGui.Button("▼", new Vector2(24, 24))) {
+            OpenFoundFilterPopup();
+        }
+        if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            OpenFoundFilterPopup();
+
+        ImGui.PopStyleVar();
+        DrawFoundFilterPopup();
+    }
+
+    private void OpenFoundFilterPopup()
+    {
+        filterFoundSmallDraft = filterFoundSmall;
+        filterFoundMediumDraft = filterFoundMedium;
+        filterFoundLargeDraft = filterFoundLarge;
+        ImGui.OpenPopup("FoundFilterPopup");
+    }
+
+    private void DrawFoundFilterPopup()
+    {
+        if (!ImGui.BeginPopup("FoundFilterPopup")) return;
+
+        ImGui.Text("Filter sizes with at least one open plot:");
+        ImGui.Separator();
+
+        ImGui.Checkbox("Small", ref filterFoundSmallDraft);
+        ImGui.Checkbox("Medium", ref filterFoundMediumDraft);
+        ImGui.Checkbox("Large", ref filterFoundLargeDraft);
+
+        ImGui.Separator();
+
+        var disableApply = !(filterFoundSmallDraft || filterFoundMediumDraft || filterFoundLargeDraft);
+        ImGui.BeginDisabled(disableApply);
+        if (ImGui.Button("Apply", new Vector2(80, 24))) {
+            filterFoundSmall = filterFoundSmallDraft;
+            filterFoundMedium = filterFoundMediumDraft;
+            filterFoundLarge = filterFoundLargeDraft;
+            filterFoundEnabled = true;
+            ImGui.CloseCurrentPopup();
+        }
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel", new Vector2(80, 24))) ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
     }
 
     private void DrawHousePanel(Dictionary<int, List<Plugin.HouseInfoEntry>> seenWards)
@@ -404,23 +527,21 @@ public class MainWindow : Window
         DrawFilterToggle("Large", ref showLargeHouses, new Vector4(0.75f, 0.28f, 0.90f, 1.0f), buttonSize);
     }
 
-    private void DrawSizePill(string label, bool isActive, Vector4 activeColor, Vector2 size)
+    private void DrawCountPill(ImDrawListPtr drawList, Vector2 pos, Vector2 size, int count, bool isActive, Vector4 activeColor)
     {
         var idleColor = new Vector4(0.20f, 0.20f, 0.22f, 1.0f);
         var bgColor = isActive ? activeColor : idleColor;
-        var textColor = isActive ? new Vector4(1f, 1f, 1f, 1f) : new Vector4(0.65f, 0.65f, 0.70f, 1.0f);
-
-        var drawList = ImGui.GetWindowDrawList();
-        var pos = ImGui.GetCursorScreenPos();
+        if (count == 0) bgColor = new Vector4(bgColor.X, bgColor.Y, bgColor.Z, 0.35f);
+        var textColor = isActive ? new Vector4(1f, 1f, 1f, 1f) : new Vector4(0.55f, 0.55f, 0.60f, 1.0f);
+        if (count == 0) textColor = new Vector4(textColor.X, textColor.Y, textColor.Z, 0.55f);
         var end = new Vector2(pos.X + size.X, pos.Y + size.Y);
-        var rounding = size.Y / 2;
+        var rounding = 4f;
 
         drawList.AddRectFilled(pos, end, ImGui.GetColorU32(bgColor), rounding);
-        var textSize = ImGui.CalcTextSize(label);
+        var text = isActive ? count.ToString() : "—";
+        var textSize = ImGui.CalcTextSize(text);
         var textPos = new Vector2(pos.X + (size.X - textSize.X) / 2, pos.Y + (size.Y - textSize.Y) / 2);
-        drawList.AddText(textPos, ImGui.GetColorU32(textColor), label);
-
-        ImGui.Dummy(size);
+        drawList.AddText(textPos, ImGui.GetColorU32(textColor), text);
     }
 
     private void EnsureSelectedTerritory()
