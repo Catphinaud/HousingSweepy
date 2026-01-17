@@ -12,12 +12,14 @@ public class MainWindow : Window
     private bool showMediumHouses = true;
     private bool showLargeHouses = true;
     private bool filterFoundEnabled;
+    private bool filterFoundUserDisabled;
     private bool filterFoundSmall = true;
     private bool filterFoundMedium = true;
     private bool filterFoundLarge = true;
     private bool filterFoundSmallDraft = true;
     private bool filterFoundMediumDraft = true;
     private bool filterFoundLargeDraft = true;
+    private bool filterFoundEnabledDraft = true;
 
     private OpenSource lastOpenSource = OpenSource.Unknown;
 
@@ -212,7 +214,11 @@ public class MainWindow : Window
         ImGui.SameLine();
         ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), selectedTerritory.TabLabel);
         ImGui.SameLine();
-        DrawFoundFilterControl();
+        var rightEdge = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        var filterLabel = "Filter \u25BE";
+        var filterSize = new Vector2(ImGui.CalcTextSize(filterLabel).X + 22, 24);
+        ImGui.SetCursorPosX(rightEdge - filterSize.X);
+        DrawFoundFilterControl(filterLabel, filterSize);
         ImGui.Separator();
 
         var contentWidth = ImGui.GetContentRegionAvail().X;
@@ -235,13 +241,13 @@ public class MainWindow : Window
         ImGui.SetCursorPosX(wardX);
         ImGui.Text("Ward");
         ImGui.SameLine();
-        ImGui.SetCursorPosX(smallX);
+        ImGui.SetCursorPosX(smallX + (sizeCol - ImGui.CalcTextSize("S").X) / 2);
         ImGui.Text("S");
         ImGui.SameLine();
-        ImGui.SetCursorPosX(mediumX);
+        ImGui.SetCursorPosX(mediumX + (sizeCol - ImGui.CalcTextSize("M").X) / 2);
         ImGui.Text("M");
         ImGui.SameLine();
-        ImGui.SetCursorPosX(largeX);
+        ImGui.SetCursorPosX(largeX + (sizeCol - ImGui.CalcTextSize("L").X) / 2);
         ImGui.Text("L");
         if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
             OpenFoundFilterPopup();
@@ -249,6 +255,8 @@ public class MainWindow : Window
 
         var rowHeight = 28f;
         var drawList = ImGui.GetWindowDrawList();
+        var anySeen = seenWards.Values.Any(houses => houses.Count > 0);
+        if (anySeen && !filterFoundUserDisabled) filterFoundEnabled = true;
         for (var ward = 0; ward <= 29; ward++) {
             var wardIndex = ward + 1;
             var seenWard = seenWards.ContainsKey(ward) && seenWards[ward].Count > 0;
@@ -258,7 +266,7 @@ public class MainWindow : Window
             var mediumCount = seenWard ? (wardHouses?.Count(h => h is { TypeShort: "M", IsOwned: false }) ?? 0) : 0;
             var largeCount = seenWard ? (wardHouses?.Count(h => h is { TypeShort: "L", IsOwned: false }) ?? 0) : 0;
 
-            if (filterFoundEnabled) {
+            if (filterFoundEnabled && anySeen) {
                 var matchSmall = filterFoundSmall && smallCount > 0;
                 var matchMedium = filterFoundMedium && mediumCount > 0;
                 var matchLarge = filterFoundLarge && largeCount > 0;
@@ -299,12 +307,10 @@ public class MainWindow : Window
         }
     }
 
-    private void DrawFoundFilterControl()
+    private void DrawFoundFilterControl(string label, Vector2 buttonSize)
     {
-        ImGui.SameLine();
         ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 6f);
 
-        var buttonSize = new Vector2(96, 24);
         var isActive = filterFoundEnabled;
         var baseColor = isActive ? new Vector4(0.20f, 0.50f, 0.70f, 1.0f) : new Vector4(0.20f, 0.20f, 0.24f, 1.0f);
 
@@ -314,16 +320,12 @@ public class MainWindow : Window
         ImGui.PushStyleColor(ImGuiCol.ButtonActive,
             new Vector4(MathF.Max(baseColor.X - 0.06f, 0f), MathF.Max(baseColor.Y - 0.06f, 0f), MathF.Max(baseColor.Z - 0.06f, 0f), 1f));
 
-        if (ImGui.Button("Found", buttonSize)) {
-            filterFoundEnabled = !filterFoundEnabled;
+        if (ImGui.Button(label, buttonSize)) {
+            OpenFoundFilterPopup();
         }
 
         ImGui.PopStyleColor(3);
 
-        ImGui.SameLine();
-        if (ImGui.Button("▼", new Vector2(24, 24))) {
-            OpenFoundFilterPopup();
-        }
         if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
             OpenFoundFilterPopup();
 
@@ -336,6 +338,7 @@ public class MainWindow : Window
         filterFoundSmallDraft = filterFoundSmall;
         filterFoundMediumDraft = filterFoundMedium;
         filterFoundLargeDraft = filterFoundLarge;
+        filterFoundEnabledDraft = filterFoundEnabled;
         ImGui.OpenPopup("FoundFilterPopup");
     }
 
@@ -346,19 +349,21 @@ public class MainWindow : Window
         ImGui.Text("Filter sizes with at least one open plot:");
         ImGui.Separator();
 
+        ImGui.Checkbox("Enable filter", ref filterFoundEnabledDraft);
         ImGui.Checkbox("Small", ref filterFoundSmallDraft);
         ImGui.Checkbox("Medium", ref filterFoundMediumDraft);
         ImGui.Checkbox("Large", ref filterFoundLargeDraft);
 
         ImGui.Separator();
 
-        var disableApply = !(filterFoundSmallDraft || filterFoundMediumDraft || filterFoundLargeDraft);
+        var disableApply = filterFoundEnabledDraft && !(filterFoundSmallDraft || filterFoundMediumDraft || filterFoundLargeDraft);
         ImGui.BeginDisabled(disableApply);
         if (ImGui.Button("Apply", new Vector2(80, 24))) {
             filterFoundSmall = filterFoundSmallDraft;
             filterFoundMedium = filterFoundMediumDraft;
             filterFoundLarge = filterFoundLargeDraft;
-            filterFoundEnabled = true;
+            filterFoundEnabled = filterFoundEnabledDraft;
+            filterFoundUserDisabled = !filterFoundEnabledDraft;
             ImGui.CloseCurrentPopup();
         }
         ImGui.EndDisabled();
@@ -556,6 +561,12 @@ public class MainWindow : Window
         else
             selectedTerritoryId = plugin.ResidentialTerritories[0].TerritoryId;
 
+        hasSelectedTerritory = true;
+    }
+
+    internal void SelectTerritory(uint territoryId)
+    {
+        selectedTerritoryId = territoryId;
         hasSelectedTerritory = true;
     }
 

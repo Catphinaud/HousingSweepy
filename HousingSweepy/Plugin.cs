@@ -138,6 +138,11 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
+    internal void SelectTerritory(uint territoryId)
+    {
+        window.SelectTerritory(territoryId);
+    }
+
     // Maybe one should remove this but I had it for debugging but removed the code in it...
     public void Commit()
     {

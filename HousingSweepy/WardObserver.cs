@@ -139,6 +139,7 @@ public unsafe class WardObserver
             AddSweep(wardInfo);
 
             var territoryId = (uint) wardInfo.LandIdent.TerritoryTypeId;
+            plugin.SelectTerritory(territoryId);
             var seen = new List<Plugin.HouseInfoEntry>();
             var seenByTerritory = plugin.GetSeenHousesForTerritory(territoryId);
             if (seenByTerritory.ContainsKey(wardInfo.LandIdent.WardNumber)) seenByTerritory.Remove(wardInfo.LandIdent.WardNumber);
