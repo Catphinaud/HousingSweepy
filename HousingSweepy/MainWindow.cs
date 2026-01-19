@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Linq;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using ECommons.DalamudServices;
@@ -8,9 +9,8 @@ namespace HousingSweepy;
 public class MainWindow : Window
 {
     private readonly Plugin plugin;
-    private bool showSmallHouses = true;
-    private bool showMediumHouses = true;
-    private bool showLargeHouses = true;
+    private readonly bool[] plotNumberFilter = Enumerable.Repeat(true, 30).ToArray();
+    private readonly bool[] plotNumberFilterDraft = Enumerable.Repeat(true, 30).ToArray();
     private bool filterFoundEnabled;
     private bool filterFoundUserDisabled;
     private bool filterFoundSmall = true;
@@ -381,10 +381,15 @@ public class MainWindow : Window
         var seenCount = CountSeenWards(seenWards);
 
         ImGui.Text($"{selectedTerritory.TabLabel} — Ward Details");
+        ImGui.SameLine();
+        var rightEdge = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        var filterLabel = "Plot Filter \u25BE";
+        var filterSize = new Vector2(ImGui.CalcTextSize(filterLabel).X + 22, 24);
+        ImGui.SetCursorPosX(rightEdge - filterSize.X);
+        DrawHouseFilterControl(filterLabel, filterSize);
+
         ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), $"{selectedTerritory.PlaceName} • {seenCount}/30 wards scanned");
         ImGui.Separator();
-
-        DrawSizeFilters();
 
         if (selectedWard < 0) {
             ImGui.Spacing();
@@ -399,8 +404,8 @@ public class MainWindow : Window
     {
         ImGui.Text($"Ward {ward + 1} Houses");
 
-        if (!showSmallHouses && !showMediumHouses && !showLargeHouses) {
-            ImGui.Text("Select at least one size filter to show houses.");
+        if (!plotNumberFilter.Any(enabled => enabled)) {
+            ImGui.Text("Select at least one plot number to show houses.");
             return;
         }
 
@@ -496,40 +501,77 @@ public class MainWindow : Window
 
     private bool ShouldShowHouse(Plugin.HouseInfoEntry house)
     {
-        return (showSmallHouses && house.TypeShort == "S")
-               || (showMediumHouses && house.TypeShort == "M")
-               || (showLargeHouses && house.TypeShort == "L");
+        var plotIndex = (house.HouseNumber % 30) + 1;
+        return plotNumberFilter[plotIndex - 1];
     }
 
-    private void DrawFilterToggle(string label, ref bool isEnabled, Vector4 activeColor, Vector2 buttonSize)
+    private void DrawHouseFilterControl(string label, Vector2 buttonSize)
     {
-        var idleColor = new Vector4(0.22f, 0.22f, 0.25f, 1.0f);
-        var textColor = new Vector4(1f, 1f, 1f, 1f);
-        var bgColor = isEnabled ? activeColor : idleColor;
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 6f);
 
-        ImGui.PushStyleColor(ImGuiCol.Button, bgColor);
+        var isActive = plotNumberFilter.Any(enabled => !enabled);
+        var baseColor = isActive ? new Vector4(0.20f, 0.50f, 0.70f, 1.0f) : new Vector4(0.20f, 0.20f, 0.24f, 1.0f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, baseColor);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered,
-            new Vector4(MathF.Min(bgColor.X + 0.08f, 1f), MathF.Min(bgColor.Y + 0.08f, 1f), MathF.Min(bgColor.Z + 0.08f, 1f), 1f));
+            new Vector4(MathF.Min(baseColor.X + 0.08f, 1f), MathF.Min(baseColor.Y + 0.08f, 1f), MathF.Min(baseColor.Z + 0.08f, 1f), 1f));
         ImGui.PushStyleColor(ImGuiCol.ButtonActive,
-            new Vector4(MathF.Max(bgColor.X - 0.06f, 0f), MathF.Max(bgColor.Y - 0.06f, 0f), MathF.Max(bgColor.Z - 0.06f, 0f), 1f));
-        ImGui.PushStyleColor(ImGuiCol.Text, textColor);
+            new Vector4(MathF.Max(baseColor.X - 0.06f, 0f), MathF.Max(baseColor.Y - 0.06f, 0f), MathF.Max(baseColor.Z - 0.06f, 0f), 1f));
 
-        if (ImGui.Button(label, buttonSize)) isEnabled = !isEnabled;
+        if (ImGui.Button(label, buttonSize)) {
+            OpenHouseFilterPopup();
+        }
 
-        ImGui.PopStyleColor(4);
+        ImGui.PopStyleColor(3);
+
+        if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            OpenHouseFilterPopup();
+
+        ImGui.PopStyleVar();
+        DrawHouseFilterPopup();
     }
 
-    private void DrawSizeFilters()
+    private void OpenHouseFilterPopup()
     {
-        ImGui.Text("Show sizes:");
-        ImGui.SameLine();
+        Array.Copy(plotNumberFilter, plotNumberFilterDraft, plotNumberFilter.Length);
+        ImGui.OpenPopup("HouseFilterPopup");
+    }
 
-        var buttonSize = new Vector2(86, 28);
-        DrawFilterToggle("Small", ref showSmallHouses, new Vector4(0.12f, 0.58f, 0.95f, 1.0f), buttonSize);
+    private void DrawHouseFilterPopup()
+    {
+        if (!ImGui.BeginPopup("HouseFilterPopup")) return;
+
+        ImGui.Text("Show plot numbers (1-30 applies to subdivision too):");
+        ImGui.Separator();
+
+        if (ImGui.Button("Show all", new Vector2(80, 24))) {
+            for (var i = 0; i < plotNumberFilterDraft.Length; i++) {
+                plotNumberFilterDraft[i] = true;
+            }
+        }
+
+        ImGui.Separator();
+
+        var columns = 6;
+        ImGui.Columns(columns, "PlotNumberFilterCols", false);
+        for (var i = 0; i < plotNumberFilterDraft.Length; i++) {
+            var label = $"{i + 1:00}";
+            ImGui.Checkbox(label, ref plotNumberFilterDraft[i]);
+            ImGui.NextColumn();
+        }
+        ImGui.Columns();
+
+        ImGui.Separator();
+
+        if (ImGui.Button("Apply", new Vector2(80, 24))) {
+            Array.Copy(plotNumberFilterDraft, plotNumberFilter, plotNumberFilter.Length);
+            ImGui.CloseCurrentPopup();
+        }
+
         ImGui.SameLine();
-        DrawFilterToggle("Medium", ref showMediumHouses, new Vector4(0.40f, 0.75f, 0.25f, 1.0f), buttonSize);
-        ImGui.SameLine();
-        DrawFilterToggle("Large", ref showLargeHouses, new Vector4(0.75f, 0.28f, 0.90f, 1.0f), buttonSize);
+        if (ImGui.Button("Cancel", new Vector2(80, 24))) ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
     }
 
     private void DrawCountPill(ImDrawListPtr drawList, Vector2 pos, Vector2 size, int count, bool isActive, Vector4 activeColor)
