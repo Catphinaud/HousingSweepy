@@ -370,6 +370,44 @@ public sealed class Plugin : IDalamudPlugin
             residentialTerritories.Add(new ResidentialTerritory(territory.RowId, entry.TabLabel, entry.PlaceName));
         }
     }
+
+    internal void EnsureResidentialTerritory(uint territoryId)
+    {
+        if (residentialTerritories.Any(t => t.TerritoryId == territoryId)) return;
+
+        var territory = Territories.GetRowOrDefault(territoryId);
+        if (territory == null) {
+            Svc.Log.Warning($"Could not find territory for ID {territoryId}.");
+            return;
+        }
+
+        var placeName = territory.Value.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
+        if (placeName == "Unknown") {
+            Svc.Log.Warning($"Could not find place name for territory ID {territoryId}.");
+        }
+        var existingIndex = residentialTerritories.FindIndex(t => t.PlaceName == placeName);
+        if (existingIndex >= 0) {
+            var existing = residentialTerritories[existingIndex];
+            residentialTerritories[existingIndex] = new ResidentialTerritory(territoryId, existing.TabLabel, existing.PlaceName);
+            return;
+        }
+
+        var tabLabel = GetTabLabelForPlaceName(placeName);
+        residentialTerritories.Add(new ResidentialTerritory(territoryId, tabLabel, placeName));
+    }
+
+    private static string GetTabLabelForPlaceName(string placeName)
+    {
+        return placeName switch
+        {
+            "The Goblet" => "Ul'dah",
+            "Mist" => "Limsa",
+            "The Lavender Beds" => "Gridania",
+            "Empyreum" => "Foundation",
+            "Shirogane" => "Kugane",
+            _ => placeName
+        };
+    }
 }
 
 // wards, 1-30 wards; 30 houses | 30 subdivision houses = 60 houses per ward

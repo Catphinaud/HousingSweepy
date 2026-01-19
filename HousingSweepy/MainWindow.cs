@@ -1,6 +1,8 @@
 using System.Numerics;
 using System.Linq;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using ECommons.DalamudServices;
 
@@ -541,21 +543,35 @@ public class MainWindow : Window
     {
         if (!ImGui.BeginPopup("HouseFilterPopup")) return;
 
-        ImGui.Text("Show plot numbers (1-30 applies to subdivision too):");
+        ImGui.Text("Show plot numbers (subdivision too):");
         ImGui.Separator();
 
+        var disableNone = !plotNumberFilterDraft.Any(enabled => enabled);
+
+        ImGui.BeginDisabled(plotNumberFilterDraft.All(enabled => enabled));
         if (ImGui.Button("Show all", new Vector2(80, 24))) {
             for (var i = 0; i < plotNumberFilterDraft.Length; i++) {
                 plotNumberFilterDraft[i] = true;
             }
         }
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+
+        ImGui.BeginDisabled(disableNone);
+        if (ImGui.Button("Show none", new Vector2(80, 24))) {
+            for (var i = 0; i < plotNumberFilterDraft.Length; i++) {
+                plotNumberFilterDraft[i] = false;
+            }
+        }
+        ImGui.EndDisabled();
 
         ImGui.Separator();
 
-        var columns = 6;
+        var columns = 3;
         ImGui.Columns(columns, "PlotNumberFilterCols", false);
         for (var i = 0; i < plotNumberFilterDraft.Length; i++) {
-            var label = $"{i + 1:00}";
+            var label = (i + 1).ToString();
             ImGui.Checkbox(label, ref plotNumberFilterDraft[i]);
             ImGui.NextColumn();
         }

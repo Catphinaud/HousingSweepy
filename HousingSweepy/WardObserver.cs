@@ -139,6 +139,7 @@ public unsafe class WardObserver
             AddSweep(wardInfo);
 
             var territoryId = (uint) wardInfo.LandIdent.TerritoryTypeId;
+            plugin.EnsureResidentialTerritory(territoryId);
             plugin.SelectTerritory(territoryId);
             var seen = new List<Plugin.HouseInfoEntry>();
             var seenByTerritory = plugin.GetSeenHousesForTerritory(territoryId);
