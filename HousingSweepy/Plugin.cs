@@ -5,6 +5,7 @@ using Dalamud.Game.Command;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
+using Dalamud.Plugin.Ipc;
 using ECommons;
 using ECommons.Automation;
 using ECommons.Automation.NeoTaskManager;
@@ -22,6 +23,7 @@ namespace HousingSweepy;
 public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/sweepy";
+    private const byte AetheryteMapMarkerDataType = 3;
 
     public static TaskManager TaskManager = null!;
 
@@ -33,6 +35,7 @@ public sealed class Plugin : IDalamudPlugin
     // state
     private readonly WardObserver wardObserver;
     private readonly MainWindow window;
+    private readonly TeleportDebugWindow teleportDebugWindow;
     internal readonly ExcelSheet<World> Worlds;
 
 
@@ -52,10 +55,16 @@ public sealed class Plugin : IDalamudPlugin
 
     public Queue<int> WardsToScan = new();
 
+    private readonly ICallGateSubscriber<uint, byte, bool> teleporterTeleportIpc;
+    private readonly ICallGateSubscriber<bool> teleporterChatMessageIpc;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         Instance = this;
         PluginInterface = pluginInterface;
+
+        teleporterTeleportIpc = pluginInterface.GetIpcSubscriber<uint, byte, bool>("Teleport");
+        teleporterChatMessageIpc = pluginInterface.GetIpcSubscriber<bool>("Teleport.ChatMessage");
 
         ECommonsMain.Init(pluginInterface, this);
         Territories = Svc.Data.GetExcelSheet<TerritoryType>();
@@ -74,15 +83,20 @@ public sealed class Plugin : IDalamudPlugin
         wardObserver = new WardObserver(this);
         _windowSystem = new WindowSystem("HousingSweepy");
         _windowSystem.AddWindow(window = new MainWindow(this));
+        _windowSystem.AddWindow(teleportDebugWindow = new TeleportDebugWindow(this));
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi += window.MarkOpenedViaCommandToggle;
         Svc.Commands.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggle the HousingSweepy window.\n'/sweepy reset' to reset seen houses."
+            HelpMessage = "Toggle the HousingSweepy window.\n'/sweepy reset' to reset seen houses.\n'/sweepy tpdebug' to toggle teleport debug."
         });
 
         Svc.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "HousingSelectBlock", OnHousingSelectBlock);
         Svc.AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "HousingSelectBlock", OnHousingSelectBlock);
+
+        Svc.Log.Information(IsTeleporterIpcAvailable()
+            ? "Teleporter IPC is available."
+            : "Teleporter IPC is not available.");
     }
 
     public IDalamudPluginInterface PluginInterface { get; }
@@ -162,6 +176,167 @@ public sealed class Plugin : IDalamudPlugin
         wardObserver.Dispose();
     }
 
+    public bool IsTeleporterIpcAvailable()
+    {
+        try {
+            _ = teleporterChatMessageIpc.InvokeFunc();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    public bool TryTeleportViaIpc(uint aetheryteId, byte subIndex)
+    {
+        if (!IsTeleporterIpcAvailable()) return false;
+
+        try {
+            return teleporterTeleportIpc.InvokeFunc(aetheryteId, subIndex);
+        } catch (Exception ex) {
+            Svc.Log.Warning(ex, "Teleporter IPC call failed.");
+            return false;
+        }
+    }
+
+    public bool TryGetClosestAetheryte(Level level, out Aetheryte aetheryte)
+    {
+        if (!level.Territory.IsValid) {
+            aetheryte = default;
+            return false;
+        }
+
+        if (level.Territory.Value.Aetheryte.RowId != 0 && level.Territory.Value.Aetheryte.IsValid) {
+            aetheryte = level.Territory.Value.Aetheryte.Value;
+            return true;
+        }
+
+        return TryGetClosestAetheryte(level.Territory.RowId, new Vector2(level.X, level.Z), out aetheryte);
+    }
+
+    public bool TryGetClosestAetheryte(uint territoryId, Vector2 mapCoords, out Aetheryte aetheryte)
+    {
+        var candidates = GetAetherytesForTerritoryMap(territoryId);
+        if (candidates.Count == 0) {
+            aetheryte = default;
+            return false;
+        }
+
+        aetheryte = default;
+        var currentDistance = float.MaxValue;
+
+        foreach (var aetheryteRow in candidates) {
+            if (!TryGetAetheryteMapMarker(aetheryteRow.RowId, out var marker)) continue;
+
+            var markerCoords = new Vector2(marker.X, marker.Y);
+            var distance = (markerCoords - mapCoords).LengthSquared();
+            if (distance >= currentDistance) continue;
+
+            currentDistance = distance;
+            aetheryte = aetheryteRow;
+        }
+
+        if (currentDistance != float.MaxValue) return true;
+
+        // Fallback when map markers cannot be resolved.
+        aetheryte = candidates[0];
+        return true;
+    }
+
+    public bool TryGetClosestAetheryte(uint territoryId, out Aetheryte aetheryte)
+    {
+        var territory = Territories.GetRowOrDefault(territoryId);
+        if (territory == null) {
+            aetheryte = default;
+            return false;
+        }
+
+        if (territory.Value.Aetheryte.RowId != 0 && territory.Value.Aetheryte.IsValid) {
+            aetheryte = territory.Value.Aetheryte.Value;
+            return true;
+        }
+
+        var candidates = GetAetherytesForTerritoryMap(territoryId);
+        if (candidates.Count == 0) {
+            aetheryte = default;
+            return false;
+        }
+
+        aetheryte = candidates[0];
+        return true;
+    }
+
+    public bool TryTeleportToClosestAetheryte(uint territoryId)
+    {
+        return TryGetClosestAetheryte(territoryId, out var aetheryte) && TryTeleportViaIpc(aetheryte.RowId, 0);
+    }
+
+    public bool TryGetCityTerritoryId(string tabLabel, out uint territoryId)
+    {
+        switch (tabLabel)
+        {
+            case "Limsa":
+                territoryId = 129;
+                return true;
+            case "Ul'dah":
+                territoryId = 130;
+                return true;
+            case "Gridania":
+                territoryId = 132;
+                return true;
+            case "Foundation":
+                territoryId = 418;
+                return true;
+            case "Kugane":
+                territoryId = 628;
+                return true;
+            default:
+                territoryId = 0;
+                return false;
+        }
+    }
+
+    public bool IsPlayerFarFromClosestAetheryte(uint territoryId, float minDistance)
+    {
+        var player = Svc.Objects.LocalPlayer;
+        if (player == null) return true;
+
+        var playerCoords = new Vector2(player.Position.X, player.Position.Z);
+        if (!TryGetClosestAetheryte(territoryId, playerCoords, out var aetheryte)) return true;
+        if (!TryGetAetheryteMapMarker(aetheryte.RowId, out var marker)) return true;
+
+        var markerCoords = new Vector2(marker.X, marker.Y);
+        var distance = Vector2.Distance(playerCoords, markerCoords);
+        return distance > minDistance;
+    }
+
+    public List<Aetheryte> GetAetherytesForTerritoryMap(uint territoryId)
+    {
+        var territory = Territories.GetRowOrDefault(territoryId);
+        if (territory == null) return [];
+
+        var mapId = territory.Value.Map.RowId;
+        return Svc.Data.GetExcelSheet<Aetheryte>()
+            .Where(row => row.Territory.RowId == territoryId && row.Map.RowId == mapId)
+            .OrderBy(row => row.RowId)
+            .ToList();
+    }
+
+    private bool TryGetAetheryteMapMarker(uint aetheryteId, out MapMarker marker)
+    {
+        foreach (var subrowCollection in Svc.Data.Excel.GetSubrowSheet<MapMarker>()) {
+            foreach (var mapMarker in subrowCollection) {
+                if (mapMarker.DataType != AetheryteMapMarkerDataType) continue;
+                if (mapMarker.DataKey.RowId == 0 || mapMarker.DataKey.RowId != aetheryteId) continue;
+
+                marker = mapMarker;
+                return true;
+            }
+        }
+
+        marker = default;
+        return false;
+    }
+
     private void OnHousingSelectBlock(AddonEvent type, AddonArgs args)
     {
         var isClosing = type == AddonEvent.PreFinalize;
@@ -173,10 +348,19 @@ public sealed class Plugin : IDalamudPlugin
 
     public void OnCommand(string command, string args)
     {
-        if (args.Trim().ToLower() == "reset")
-            ResetSeenHouses();
-        else
-            window.MarkOpenedViaCommandToggle();
+        var arg = args.Trim().ToLowerInvariant();
+        switch (arg) {
+            case "reset":
+                ResetSeenHouses();
+                break;
+            case "tpdebug":
+            case "teleportdebug":
+                teleportDebugWindow.IsOpen = !teleportDebugWindow.IsOpen;
+                break;
+            default:
+                window.MarkOpenedViaCommandToggle();
+                break;
+        }
     }
 
     public void ResetSeenHouses()

@@ -102,6 +102,10 @@ public class MainWindow : Window
                     : $"World: {worldId} ({worldName})";
 
             ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), worldLabel);
+            var teleporterIpcAvailable = plugin.IsTeleporterIpcAvailable();
+            ImGui.TextColored(
+                teleporterIpcAvailable ? new Vector4(0.06f, 0.70f, 0.50f, 1.0f) : new Vector4(0.86f, 0.22f, 0.22f, 1.0f),
+                teleporterIpcAvailable ? "Teleporter IPC: Available" : "Teleporter IPC: Unavailable");
 
             ImGui.TableSetColumnIndex(1);
 
@@ -201,6 +205,21 @@ public class MainWindow : Window
 
         if (ImGui.Button($"{territory.TabLabel}##Territory{territory.TerritoryId}", new Vector2(-1, 30))) {
             selectedTerritoryId = territory.TerritoryId;
+        }
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) {
+            if (plugin.TryGetCityTerritoryId(territory.TabLabel, out var cityTerritoryId)) {
+                var currentTerritory = (uint)Svc.ClientState.TerritoryType;
+                var inTargetTerritory = currentTerritory == cityTerritoryId || currentTerritory == territory.TerritoryId;
+                var allowTeleport = !inTargetTerritory || plugin.IsPlayerFarFromClosestAetheryte(cityTerritoryId, 30f);
+
+                if (!allowTeleport) {
+                    Svc.Chat.Print($"Already near the {territory.TabLabel} aetheryte.");
+                } else if (!plugin.TryTeleportToClosestAetheryte(cityTerritoryId)) {
+                    Svc.Chat.PrintError($"Unable to teleport to {territory.TabLabel} via Teleporter IPC.");
+                }
+            } else {
+                Svc.Chat.PrintError($"No city territory mapping for {territory.TabLabel}.");
+            }
         }
 
         ImGui.PopStyleColor(4);
@@ -449,6 +468,7 @@ public class MainWindow : Window
         });
 
         var btnSize = new Vector2(78, 28);
+        var canTeleportToDistrict = plugin.TryGetClosestAetheryte(selectedTerritoryId, out var closestAetheryte);
 
         var pale = new Vector4(0.12f, 0.58f, 0.95f, 1.0f); // bright azure (blue)
         var gold = new Vector4(0.75f, 0.28f, 0.90f, 1.0f); // magenta/purple (distinct from blue/green)
@@ -481,10 +501,20 @@ public class MainWindow : Window
 
             ImGui.PopStyleColor(3);
 
+            if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) {
+                if (!plugin.TryTeleportToClosestAetheryte(selectedTerritoryId)) {
+                    Svc.Chat.PrintError("Unable to teleport via Teleporter IPC.");
+                }
+            }
+
             if (ImGui.IsItemHovered()) {
                 ImGui.BeginTooltip();
                 ImGui.Text($"{houseLabel}{(isSubdivision ? " (Subdivision)" : "")}");
                 ImGui.Text($"Price: {house.HousePrice:N0} gil");
+                if (canTeleportToDistrict) {
+                    var placeName = closestAetheryte.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
+                    ImGui.Text($"Right-click: Teleport to {placeName}");
+                }
                 ImGui.EndTooltip();
             }
 
