@@ -5,6 +5,8 @@ using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using ECommons.DalamudServices;
+using Lumina.Excel.Sheets;
+using Lumina.Extensions;
 
 namespace HousingSweepy;
 
@@ -89,7 +91,17 @@ public class MainWindow : Window
             ImGui.TableSetColumnIndex(0);
             ImGui.Text("HousingSweepy");
             ImGui.SameLine();
-            ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), plugin.IsScanningWards ? "Scanning…" : "Idle");
+            ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), plugin.IsScanningWards ? "Scanning..." : "Idle");
+
+            var worldId = plugin.CurrentWorldId;
+            var worldName = plugin.CurrentWorldName;
+            var worldLabel = worldId == null
+                ? "World: (unknown)"
+                : worldName == null
+                    ? $"World: {worldId}"
+                    : $"World: {worldId} ({worldName})";
+
+            ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), worldLabel);
 
             ImGui.TableSetColumnIndex(1);
 
@@ -290,7 +302,9 @@ public class MainWindow : Window
 
             var rowColor = isSelected
                 ? new Vector4(0.23f, 0.40f, 0.55f, 0.85f)
-                : isHovered ? new Vector4(0.20f, 0.20f, 0.24f, 0.8f) : new Vector4(0f, 0f, 0f, 0f);
+                : isHovered
+                    ? new Vector4(0.20f, 0.20f, 0.24f, 0.8f)
+                    : new Vector4(0f, 0f, 0f, 0f);
             if (rowColor.W > 0f)
                 drawList.AddRectFilled(rowTop, rowBottom, ImGui.GetColorU32(rowColor), 6f);
 
@@ -368,6 +382,7 @@ public class MainWindow : Window
             filterFoundUserDisabled = !filterFoundEnabledDraft;
             ImGui.CloseCurrentPopup();
         }
+
         ImGui.EndDisabled();
 
         ImGui.SameLine();
@@ -427,10 +442,10 @@ public class MainWindow : Window
             var ownedComparison = a.IsOwned.CompareTo(b.IsOwned);
             if (ownedComparison != 0) return ownedComparison;
 
-            var priceComparison = a.HousePrice.CompareTo(b.HousePrice);
-            if (priceComparison != 0) return priceComparison;
+            // var priceComparison = a.HousePrice.CompareTo(b.HousePrice);
+            // if (priceComparison != 0) return priceComparison;
 
-            return String.Compare(a.TypeShort, b.TypeShort, StringComparison.Ordinal);
+            return a.HouseNumber.CompareTo(b.HouseNumber);
         });
 
         var btnSize = new Vector2(78, 28);
@@ -458,6 +473,10 @@ public class MainWindow : Window
 
             if (ImGui.Button(houseLabel, btnSize)) {
                 // Handle house selection logic here
+                var territoryId = selectedTerritoryId;
+                var houseIndex = house.HouseNumber;
+
+                plugin.OpenPlot(houseIndex, territoryId);
             }
 
             ImGui.PopStyleColor(3);
@@ -554,6 +573,7 @@ public class MainWindow : Window
                 plotNumberFilterDraft[i] = true;
             }
         }
+
         ImGui.EndDisabled();
 
         ImGui.SameLine();
@@ -564,6 +584,7 @@ public class MainWindow : Window
                 plotNumberFilterDraft[i] = false;
             }
         }
+
         ImGui.EndDisabled();
 
         ImGui.Separator();
@@ -575,6 +596,7 @@ public class MainWindow : Window
             ImGui.Checkbox(label, ref plotNumberFilterDraft[i]);
             ImGui.NextColumn();
         }
+
         ImGui.Columns();
 
         ImGui.Separator();

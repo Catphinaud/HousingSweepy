@@ -1,4 +1,5 @@
-﻿using Dalamud.Game.Addon.Lifecycle;
+﻿using System.Numerics;
+using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Command;
 using Dalamud.Interface.ImGuiNotification;
@@ -20,15 +21,13 @@ namespace HousingSweepy;
 
 public sealed class Plugin : IDalamudPlugin
 {
-    public IDalamudPluginInterface PluginInterface { get; }
-
-    public static Plugin Instance { get; private set; } = null!;
-
     private const string CommandName = "/sweepy";
 
     public static TaskManager TaskManager = null!;
 
     private readonly WindowSystem _windowSystem;
+
+    private readonly List<ResidentialTerritory> residentialTerritories = new();
     internal readonly ExcelSheet<TerritoryType> Territories;
 
     // state
@@ -43,16 +42,15 @@ public sealed class Plugin : IDalamudPlugin
 
     public WordTerritory? LastCommittedZoneAndWorld;
 
-    public Dictionary<uint, Dictionary<int, List<HouseInfoEntry>>> SeenHousesByTerritory = new();
+    // Now stored per WorldId -> TerritoryId -> WardNumber -> House list
+    public Dictionary<uint, Dictionary<uint, Dictionary<int, List<HouseInfoEntry>>>> SeenHousesByWorldAndTerritory = new();
 
     public bool StopNext;
 
-    public Dictionary<uint, List<WardInfo>> WardsByTerritory = new();
+    // Now stored per WorldId -> TerritoryId -> Ward list
+    public Dictionary<uint, Dictionary<uint, List<WardInfo>>> WardsByWorldAndTerritory = new();
 
     public Queue<int> WardsToScan = new();
-
-    private readonly List<ResidentialTerritory> residentialTerritories = new();
-    public IReadOnlyList<ResidentialTerritory> ResidentialTerritories => residentialTerritories;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -87,6 +85,67 @@ public sealed class Plugin : IDalamudPlugin
         Svc.AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "HousingSelectBlock", OnHousingSelectBlock);
     }
 
+    public IDalamudPluginInterface PluginInterface { get; }
+
+    public static Plugin Instance { get; private set; } = null!;
+    public IReadOnlyList<ResidentialTerritory> ResidentialTerritories => residentialTerritories;
+
+    public unsafe uint? CurrentWorldId
+    {
+        get {
+            var agentLobbyPtr = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentLobby.Instance();
+            return !agentLobbyPtr->IsLoggedIn ? null : agentLobbyPtr->LobbyData.CurrentWorldId;
+        }
+    }
+
+    public string? CurrentWorldName => Svc.PlayerState.CurrentWorld.ValueNullable?.Name.ToString() ?? null;
+
+    public unsafe void OpenPlot(uint plotId, uint mapId)
+    {
+        plotId = Math.Clamp(plotId, 0, 62);
+
+        var instance = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentMap.Instance();
+
+        if (instance == null)
+        {
+            Svc.Chat.PrintError("Could not get AgentMap instance.");
+            return;
+        }
+
+        var housingMapMarkerInfo = Svc.Data.Excel.GetSubrowSheet<HousingMapMarkerInfo>().GetSubrowOrDefault(mapId, (ushort)plotId);
+
+        if (housingMapMarkerInfo == null)
+        {
+            Svc.Chat.PrintError($"No housing map marker info found for the map {mapId} with subrow id {plotId}.");
+            return;
+        }
+
+        var info = housingMapMarkerInfo.Value;
+
+        var position = new Vector3(info.X, info.Y, info.Z);
+
+        if (info.Map.Value.TerritoryType.ValueNullable is not {} territory)
+        {
+            Svc.Chat.PrintError($"No territory found for the map {mapId} with subrow id {plotId}.");
+            return;
+        }
+
+        uint realMapId = info.Map.RowId;
+        uint realTerritoryId = territory.RowId;
+
+        position.X += territory.Map.Value.OffsetX;
+        position.Z += territory.Map.Value.OffsetY;
+
+        instance->SetFlagMapMarker(realTerritoryId, territory.Map.RowId, position, 71296);
+
+        if (!instance->AddMiniMapMarker(position, 71296))
+        {
+            Svc.Chat.PrintError("Unable to place mini map marker");
+        }
+
+        instance->OpenMap(realMapId, realTerritoryId);
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -94,7 +153,7 @@ public sealed class Plugin : IDalamudPlugin
         _disposed = true;
 
         Svc.Commands.RemoveHandler(CommandName);
-        Svc.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "HousingSelectBlock", OnHousingSelectBlock);
+        Svc.AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "HousingSelectBlock", OnHousingSelectBlock);
         Svc.AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "HousingSelectBlock", OnHousingSelectBlock);
 
         PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
@@ -122,8 +181,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public void ResetSeenHouses()
     {
-        SeenHousesByTerritory.Clear();
-        WardsByTerritory.Clear();
+        SeenHousesByWorldAndTerritory.Clear();
+        WardsByWorldAndTerritory.Clear();
 
         try {
             wardObserver?.ResetSweep();
@@ -138,11 +197,6 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
-    internal void SelectTerritory(uint territoryId)
-    {
-        window.SelectTerritory(territoryId);
-    }
-
     // Maybe one should remove this but I had it for debugging but removed the code in it...
     public void Commit()
     {
@@ -152,14 +206,8 @@ public sealed class Plugin : IDalamudPlugin
         var key = new WordTerritory(worldId, territoryId);
 
         if (LastCommittedZoneAndWorld == null || !LastCommittedZoneAndWorld.Equals(key)) {
-            if (LastCommittedZoneAndWorld != null && LastCommittedZoneAndWorld.WorldId != worldId) {
-                SeenHousesByTerritory.Clear();
-                WardsByTerritory.Clear();
-            }
-
             LastCommittedZoneAndWorld = key;
-
-            // Keep per-territory seen houses; update current key only.
+            // Caches are world-scoped now; no need to clear on world change.
         }
     }
 
@@ -274,6 +322,124 @@ public sealed class Plugin : IDalamudPlugin
         if (EzThrottler.Throttle("ScanHouse", 100)) Callback.Fire((AtkUnitBase*) addon.Address, true, 1, ward);
     }
 
+    private uint GetWorldBucketId()
+    {
+        // Prefer lobby (works even while zoning), fall back to PlayerState.
+        return CurrentWorldId ?? Svc.PlayerState.CurrentWorld.RowId;
+    }
+
+    public Dictionary<int, List<HouseInfoEntry>> GetSeenHousesForTerritory(uint territoryId)
+    {
+        var worldId = GetWorldBucketId();
+
+        if (!SeenHousesByWorldAndTerritory.TryGetValue(worldId, out var byTerritory)) {
+            byTerritory = new Dictionary<uint, Dictionary<int, List<HouseInfoEntry>>>();
+            SeenHousesByWorldAndTerritory[worldId] = byTerritory;
+        }
+
+        if (!byTerritory.TryGetValue(territoryId, out var seen)) {
+            seen = new Dictionary<int, List<HouseInfoEntry>>();
+            byTerritory[territoryId] = seen;
+        }
+
+        return seen;
+    }
+
+    public List<WardInfo> GetWardsForTerritory(uint territoryId)
+    {
+        var worldId = GetWorldBucketId();
+
+        if (!WardsByWorldAndTerritory.TryGetValue(worldId, out var byTerritory)) {
+            byTerritory = new Dictionary<uint, List<WardInfo>>();
+            WardsByWorldAndTerritory[worldId] = byTerritory;
+        }
+
+        if (!byTerritory.TryGetValue(territoryId, out var wards)) {
+            wards = new List<WardInfo>();
+            byTerritory[territoryId] = wards;
+        }
+
+        return wards;
+    }
+
+    public bool HasAnySeenHouses()
+    {
+        var worldId = GetWorldBucketId();
+        if (!SeenHousesByWorldAndTerritory.TryGetValue(worldId, out var byTerritory)) return false;
+
+        foreach (var territory in byTerritory.Values) {
+            if (territory.Count > 0) return true;
+        }
+
+        return false;
+    }
+
+    private void InitializeResidentialTerritories()
+    {
+        var entries = new[]
+        {
+            new { TabLabel = "Ul'dah", PlaceName = "The Goblet" },
+            new { TabLabel = "Limsa", PlaceName = "Mist" },
+            new { TabLabel = "Gridania", PlaceName = "The Lavender Beds" },
+            new { TabLabel = "Foundation", PlaceName = "Empyreum" },
+            new { TabLabel = "Kugane", PlaceName = "Shirogane" }
+        };
+
+        foreach (var entry in entries) {
+            var territory = Territories.FirstOrDefault(t => t.PlaceName.ValueNullable?.Name.ToString() == entry.PlaceName);
+            if (territory.RowId == 0) {
+                Svc.Log.Warning($"Could not find territory for {entry.PlaceName}.");
+                continue;
+            }
+
+            residentialTerritories.Add(new ResidentialTerritory(territory.RowId, entry.TabLabel, entry.PlaceName));
+        }
+    }
+
+    internal void EnsureResidentialTerritory(uint territoryId)
+    {
+        if (residentialTerritories.Any(t => t.TerritoryId == territoryId)) return;
+
+        var territory = Territories.GetRowOrDefault(territoryId);
+        if (territory == null) {
+            Svc.Log.Warning($"Could not find territory for ID {territoryId}.");
+            return;
+        }
+
+        var placeName = territory.Value.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
+        if (placeName == "Unknown") {
+            Svc.Log.Warning($"Could not find place name for territory ID {territoryId}.");
+        }
+
+        var existingIndex = residentialTerritories.FindIndex(t => t.PlaceName == placeName);
+        if (existingIndex >= 0) {
+            var existing = residentialTerritories[existingIndex];
+            residentialTerritories[existingIndex] = new ResidentialTerritory(territoryId, existing.TabLabel, existing.PlaceName);
+            return;
+        }
+
+        var tabLabel = GetTabLabelForPlaceName(placeName);
+        residentialTerritories.Add(new ResidentialTerritory(territoryId, tabLabel, placeName));
+    }
+
+    public void SelectTerritory(uint territoryId)
+    {
+        window.SelectTerritory(territoryId);
+    }
+
+    private static string GetTabLabelForPlaceName(string placeName)
+    {
+        return placeName switch
+        {
+            "The Goblet" => "Ul'dah",
+            "Mist" => "Limsa",
+            "The Lavender Beds" => "Gridania",
+            "Empyreum" => "Foundation",
+            "Shirogane" => "Kugane",
+            _ => placeName
+        };
+    }
+
     public record HouseInfoEntry(ushort HouseNumber, uint HousePrice, bool IsOwned)
     {
         public string TypeShort => HousePrice switch
@@ -319,95 +485,6 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     public readonly record struct ResidentialTerritory(uint TerritoryId, string TabLabel, string PlaceName);
-
-    public Dictionary<int, List<HouseInfoEntry>> GetSeenHousesForTerritory(uint territoryId)
-    {
-        if (!SeenHousesByTerritory.TryGetValue(territoryId, out var seen)) {
-            seen = new Dictionary<int, List<HouseInfoEntry>>();
-            SeenHousesByTerritory[territoryId] = seen;
-        }
-
-        return seen;
-    }
-
-    public List<WardInfo> GetWardsForTerritory(uint territoryId)
-    {
-        if (!WardsByTerritory.TryGetValue(territoryId, out var wards)) {
-            wards = new List<WardInfo>();
-            WardsByTerritory[territoryId] = wards;
-        }
-
-        return wards;
-    }
-
-    public bool HasAnySeenHouses()
-    {
-        foreach (var territory in SeenHousesByTerritory.Values) {
-            if (territory.Count > 0) return true;
-        }
-
-        return false;
-    }
-
-    private void InitializeResidentialTerritories()
-    {
-        var entries = new[]
-        {
-            new { TabLabel = "Ul'dah", PlaceName = "The Goblet" },
-            new { TabLabel = "Limsa", PlaceName = "Mist" },
-            new { TabLabel = "Gridania", PlaceName = "The Lavender Beds" },
-            new { TabLabel = "Foundation", PlaceName = "Empyreum" },
-            new { TabLabel = "Kugane", PlaceName = "Shirogane" }
-        };
-
-        foreach (var entry in entries) {
-            var territory = Territories.FirstOrDefault(t => t.PlaceName.ValueNullable?.Name.ToString() == entry.PlaceName);
-            if (territory.RowId == 0) {
-                Svc.Log.Warning($"Could not find territory for {entry.PlaceName}.");
-                continue;
-            }
-
-            residentialTerritories.Add(new ResidentialTerritory(territory.RowId, entry.TabLabel, entry.PlaceName));
-        }
-    }
-
-    internal void EnsureResidentialTerritory(uint territoryId)
-    {
-        if (residentialTerritories.Any(t => t.TerritoryId == territoryId)) return;
-
-        var territory = Territories.GetRowOrDefault(territoryId);
-        if (territory == null) {
-            Svc.Log.Warning($"Could not find territory for ID {territoryId}.");
-            return;
-        }
-
-        var placeName = territory.Value.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
-        if (placeName == "Unknown") {
-            Svc.Log.Warning($"Could not find place name for territory ID {territoryId}.");
-        }
-        var existingIndex = residentialTerritories.FindIndex(t => t.PlaceName == placeName);
-        if (existingIndex >= 0) {
-            var existing = residentialTerritories[existingIndex];
-            residentialTerritories[existingIndex] = new ResidentialTerritory(territoryId, existing.TabLabel, existing.PlaceName);
-            return;
-        }
-
-        var tabLabel = GetTabLabelForPlaceName(placeName);
-        residentialTerritories.Add(new ResidentialTerritory(territoryId, tabLabel, placeName));
-    }
-
-    private static string GetTabLabelForPlaceName(string placeName)
-    {
-        return placeName switch
-        {
-            "The Goblet" => "Ul'dah",
-            "Mist" => "Limsa",
-            "The Lavender Beds" => "Gridania",
-            "Empyreum" => "Foundation",
-            "Shirogane" => "Kugane",
-            _ => placeName
-        };
-    }
 }
 
 // wards, 1-30 wards; 30 houses | 30 subdivision houses = 60 houses per ward
