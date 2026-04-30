@@ -16,7 +16,7 @@ using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
-using VT = FFXIVClientStructs.FFXIV.Component.GUI.ValueType;
+using VT = FFXIVClientStructs.FFXIV.Component.GUI.AtkValue;
 
 namespace HousingSweepy;
 

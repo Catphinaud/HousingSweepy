@@ -93,7 +93,7 @@ public unsafe class WardObserver
         housingWardInfoHook?.Enable();
     }
 
-    public int CurrentTerritoryTypeId { get; set; } = -1;
+    public uint CurrentTerritoryTypeId { get; set; } = 0;
 
 
     public int DistrictId { get; private set; }

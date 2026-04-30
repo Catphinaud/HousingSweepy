@@ -18,7 +18,7 @@ public class TeleportDebugWindow : Window
     ];
 
     private readonly Plugin plugin;
-    private int territoryIdInput;
+    private uint territoryIdInput;
     private float mapXInput;
     private float mapZInput;
 
@@ -53,7 +53,7 @@ public class TeleportDebugWindow : Window
         ImGui.Separator();
 
         ImGui.SetNextItemWidth(140f);
-        ImGui.InputInt("Territory ID", ref territoryIdInput);
+        ImGui.InputUInt("Territory ID", ref territoryIdInput);
         if (ImGui.Button("Use Current Territory")) {
             territoryIdInput = Svc.ClientState.TerritoryType;
         }
