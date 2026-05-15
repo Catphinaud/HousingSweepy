@@ -1,4 +1,5 @@
-﻿using Dalamud.Hooking;
+﻿using System.Text;
+using Dalamud.Hooking;
 using Dalamud.Utility.Signatures;
 using ECommons.DalamudServices;
 
@@ -12,6 +13,7 @@ public class HouseInfoEntry
 {
     public uint HousePrice;
     public HousingFlags InfoFlags;
+    public string EstateOwnerName = "";
 }
 
 [Flags]
@@ -28,6 +30,7 @@ public class HousingWardInfo
 {
     public required HouseInfoEntry[] HouseInfoEntries;
     public required LandIdent LandIdent;
+    public required byte TenantType;
 
     public static unsafe HousingWardInfo Read(IntPtr dataPtr)
     {
@@ -51,12 +54,13 @@ public class HousingWardInfo
             // for (var j = 0; j < 3; j++) infoEntry.HouseAppeals[j] = binaryReader.ReadSByte();
             binaryReader.ReadBytes(3); // skip appeals for now
             //infoEntry.EstateOwnerName = Encoding.UTF8.GetString(binaryReader.ReadBytes(32)).TrimEnd(new char[1]);
-            binaryReader.ReadBytes(32); // skip owner name
+            // houseInfoEntries[i] = binaryReader.ReadBytes(32); // Name
+            infoEntry.EstateOwnerName = Encoding.UTF8.GetString(binaryReader.ReadBytes(32)).TrimEnd('\0').Trim();
             houseInfoEntries[i] = infoEntry;
 
             // if a house is unowned, the ownerName can be literally anything, so set it to empty string
             if ((infoEntry.InfoFlags & HousingFlags.PlotOwned) == 0) {
-                // infoEntry.EstateOwnerName = "";
+                infoEntry.EstateOwnerName = "";
             }
         }
 
@@ -65,7 +69,7 @@ public class HousingWardInfo
         // 0x2441 - padding byte?
         binaryReader.ReadByte();
         // 0x2442 Tenant Type
-        binaryReader.ReadByte();
+        var tenantType = binaryReader.ReadByte();
         // 0x2443 - padding byte?
         binaryReader.ReadByte();
         // 0x2444 - 0x2447 appear to be padding bytes
@@ -73,7 +77,8 @@ public class HousingWardInfo
         return new HousingWardInfo
         {
             LandIdent = landIdent,
-            HouseInfoEntries = houseInfoEntries
+            HouseInfoEntries = houseInfoEntries,
+            TenantType = tenantType
         };
     }
 }
@@ -93,7 +98,7 @@ public unsafe class WardObserver
         housingWardInfoHook?.Enable();
     }
 
-    public uint CurrentTerritoryTypeId { get; set; } = 0;
+    public uint CurrentTerritoryTypeId { get; set; } = 875431;
 
 
     public int DistrictId { get; private set; }
@@ -124,6 +129,7 @@ public unsafe class WardObserver
 
         var wardInfo = HousingWardInfo.Read(dataPtr);
         Svc.Log.Debug($"Got HousingWardInfo for ward: {wardInfo.LandIdent.WardNumber} territory: {wardInfo.LandIdent.TerritoryTypeId}");
+        MainWindow.WardType[wardInfo.LandIdent.WardNumber] = wardInfo.TenantType;
 
         // if the current wardinfo is for a different district than the last swept one, print the header
         // or if the last sweep was > 10m ago
@@ -151,7 +157,11 @@ public unsafe class WardObserver
             for (ushort i = 0; i < wardInfo.HouseInfoEntries.Length; i++) {
                 var houseInfoEntry = wardInfo.HouseInfoEntries[i];
                 if (!houseList.Exists(h => h.HouseNumber == i))
-                    houseList.Add(new Plugin.HouseInfoEntry(i, houseInfoEntry.HousePrice, (houseInfoEntry.InfoFlags & HousingFlags.PlotOwned) != 0));
+                    houseList.Add(new Plugin.HouseInfoEntry(
+                        i,
+                        houseInfoEntry.HousePrice,
+                        (houseInfoEntry.InfoFlags & HousingFlags.PlotOwned) != 0,
+                        houseInfoEntry.EstateOwnerName));
             }
 
             var wards = plugin.GetWardsForTerritory(territoryId);

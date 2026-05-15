@@ -24,9 +24,11 @@ public class MainWindow : Window
     private bool filterFoundMediumDraft = true;
     private bool filterFoundLargeDraft = true;
     private bool filterFoundEnabledDraft = true;
+    private string ownerNameFilter = "";
 
     private OpenSource lastOpenSource = OpenSource.Unknown;
 
+    private readonly HashSet<FavoriteHouseKey> favoriteHouses = new();
     private readonly Dictionary<uint, int> selectedWardByTerritory = new();
     private uint selectedTerritoryId;
     private bool hasSelectedTerritory;
@@ -43,6 +45,8 @@ public class MainWindow : Window
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
         };
     }
+
+    public static Dictionary<short, byte> WardType { get; set; } = new();
 
     public void MarkOpenedViaCommandToggle()
     {
@@ -102,10 +106,6 @@ public class MainWindow : Window
                     : $"World: {worldId} ({worldName})";
 
             ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), worldLabel);
-            var teleporterIpcAvailable = plugin.IsTeleporterIpcAvailable();
-            ImGui.TextColored(
-                teleporterIpcAvailable ? new Vector4(0.06f, 0.70f, 0.50f, 1.0f) : new Vector4(0.86f, 0.22f, 0.22f, 1.0f),
-                teleporterIpcAvailable ? "Teleporter IPC: Available" : "Teleporter IPC: Unavailable");
 
             ImGui.TableSetColumnIndex(1);
 
@@ -208,25 +208,28 @@ public class MainWindow : Window
         }
         if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) {
             if (plugin.TryGetCityTerritoryId(territory.TabLabel, out var cityTerritoryId)) {
-                var currentTerritory = (uint)Svc.ClientState.TerritoryType;
-                var inTargetTerritory = currentTerritory == cityTerritoryId || currentTerritory == territory.TerritoryId;
-                var allowTeleport = !inTargetTerritory || plugin.IsPlayerFarFromClosestAetheryte(cityTerritoryId, 30f);
-
-                if (!allowTeleport) {
-                    Svc.Chat.Print($"Already near the {territory.TabLabel} aetheryte.");
-                } else if (!plugin.TryTeleportToClosestAetheryte(cityTerritoryId)) {
-                    Svc.Chat.PrintError($"Unable to teleport to {territory.TabLabel} via Teleporter IPC.");
+                if (!plugin.TryOpenResidentialDistrictAethernet(cityTerritoryId)) {
+                    Svc.Chat.PrintError($"Unable to open {territory.TabLabel} residential aethernet.");
                 }
             } else {
                 Svc.Chat.PrintError($"No city territory mapping for {territory.TabLabel}.");
             }
+        }
+        if (ImGui.IsItemHovered()) {
+            ImGui.BeginTooltip();
+            ImGui.Text($"Right-click: Open {territory.TabLabel} residential aethernet");
+            ImGui.EndTooltip();
         }
 
         ImGui.PopStyleColor(4);
 
         ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), territory.PlaceName);
         var progress = seenCount / 30f;
+        ImGui.PushStyleColor(ImGuiCol.PlotHistogram, seenCount >= 30
+            ? new Vector4(0.06f, 0.70f, 0.50f, 1.0f)
+            : new Vector4(0.86f, 0.52f, 0.13f, 1.0f));
         ImGui.ProgressBar(progress, new Vector2(-1, 6), "");
+        ImGui.PopStyleColor();
         ImGui.Text($"{seenCount}/30 wards");
 
         if (seenCount < 30) {
@@ -329,7 +332,24 @@ public class MainWindow : Window
 
             var textColor = isSelected ? new Vector4(1f, 1f, 1f, 1f) : new Vector4(0.86f, 0.88f, 0.92f, 1f);
             var textPos = new Vector2(rowTop.X + 8, rowTop.Y + 6);
-            drawList.AddText(textPos, ImGui.GetColorU32(textColor), $"Ward {wardIndex:00}");
+            var territoryType = WardType.GetValueOrDefault((short) ward, (byte) 50);
+            // 0 = FC/Individual, 1 = FC only, 2 = Individual only, 50 = unknown use FontAwesome
+            if (territoryType != 50) {
+                var iconFont = ImRaii.PushFont(Svc.PluginInterface.UiBuilder.FontIcon);
+                var icon = territoryType switch
+                {
+                    0 => FontAwesomeIcon.HouseChimneyUser,
+                    1 => FontAwesomeIcon.Warehouse,
+                    2 => FontAwesomeIcon.User,
+                    _ => FontAwesomeIcon.Question
+                };
+                drawList.AddText(textPos, ImGui.GetColorU32(textColor), icon.ToIconString());
+                iconFont.Dispose();
+                textPos.X += ImGui.CalcTextSize(icon.ToIconString()).X + 6;
+                    drawList.AddText(textPos, ImGui.GetColorU32(textColor), $"Ward {wardIndex:00}");
+            } else {
+                drawList.AddText(textPos, ImGui.GetColorU32(textColor), $"Ward {wardIndex:00}");
+            }
 
 
             var pillY = rowTop.Y + 4;
@@ -426,6 +446,13 @@ public class MainWindow : Window
 
         ImGui.TextColored(new Vector4(0.55f, 0.62f, 0.70f, 1.0f), $"{selectedTerritory.PlaceName} • {seenCount}/30 wards scanned");
         ImGui.Separator();
+        ImGui.SetNextItemWidth(-1f);
+        ImGui.InputTextWithHint("##OwnerNameFilter", "Search by owner name...", ref ownerNameFilter, 64);
+
+        if (!string.IsNullOrWhiteSpace(ownerNameFilter)) {
+            DrawHousesAcrossWards(seenWards);
+            return;
+        }
 
         if (selectedWard < 0) {
             ImGui.Spacing();
@@ -434,6 +461,101 @@ public class MainWindow : Window
         }
 
         DrawHousesInWard(selectedWard, seenWards);
+    }
+
+    private void DrawHousesAcrossWards(Dictionary<int, List<Plugin.HouseInfoEntry>> seenWards)
+    {
+        ImGui.Text("Owner Search Results (All Wards)");
+
+        if (!plotNumberFilter.Any(enabled => enabled)) {
+            ImGui.Text("Select at least one plot number to show houses.");
+            return;
+        }
+
+        var allHouses = new List<(int Ward, Plugin.HouseInfoEntry House)>();
+        for (var ward = 0; ward < 30; ward++) {
+            if (!seenWards.TryGetValue(ward, out var houses) || houses.Count == 0) continue;
+            allHouses.AddRange(houses.Select(house => (ward, house)));
+        }
+
+        if (allHouses.Count == 0) {
+            ImGui.Text("No seen houses in this territory.");
+            return;
+        }
+
+        allHouses.Sort((a, b) => {
+            var wardComparison = a.Ward.CompareTo(b.Ward);
+            if (wardComparison != 0) return wardComparison;
+            return a.House.HouseNumber.CompareTo(b.House.HouseNumber);
+        });
+
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 6.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 4));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4, 6));
+
+        var btnSize = new Vector2(100, 28);
+        var canTeleportToDistrict = plugin.TryGetClosestAetheryte(selectedTerritoryId, out var closestAetheryte);
+        var canTravelToPlot = plugin.IsLifestreamIpcAvailable();
+
+        var pale = new Vector4(0.12f, 0.58f, 0.95f, 1.0f);
+        var gold = new Vector4(0.75f, 0.28f, 0.90f, 1.0f);
+        var red = new Vector4(0.40f, 0.40f, 0.40f, 1.0f);
+
+        ImGui.Columns(3, "HouseOwnerSearchCols", false);
+        var renderedCount = 0;
+
+        foreach (var (ward, house) in allHouses) {
+            if (!ShouldShowHouse(house)) continue;
+            renderedCount++;
+
+            var houseNumber = house.HouseNumber + 1;
+            var isSubdivision = houseNumber > 30;
+            var isFavorite = IsFavorite(selectedTerritoryId, ward, house.HouseNumber);
+            var houseLabel = $"{(isFavorite ? "* " : "")}W{ward + 1:00} {house.TypeShort} {houseNumber:00}";
+
+            var houseColor = house.IsOwned ? red : house.TypeShort == "L" ? gold : house.TypeShort == "M" ? new Vector4(0.6f, 0.8f, 0.3f, 1.0f) : pale;
+
+            ImGui.PushStyleColor(ImGuiCol.Button, houseColor);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered,
+                new Vector4(MathF.Min(houseColor.X + 0.06f, 1f), MathF.Min(houseColor.Y + 0.06f, 1f), MathF.Min(houseColor.Z + 0.06f, 1f), 1f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive,
+                new Vector4(MathF.Max(houseColor.X - 0.05f, 0f), MathF.Max(houseColor.Y - 0.05f, 0f), MathF.Max(houseColor.Z - 0.05f, 0f), 1f));
+
+            if (ImGui.Button(houseLabel, btnSize)) {
+                plugin.OpenPlot(house.HouseNumber, selectedTerritoryId);
+            }
+
+            ImGui.PopStyleColor(3);
+
+            DrawHouseContextMenu($"OwnerSearchHouse{selectedTerritoryId}_{ward}_{house.HouseNumber}", selectedTerritoryId, ward, house.HouseNumber);
+
+            if (ImGui.IsItemHovered()) {
+                ImGui.BeginTooltip();
+                ImGui.Text($"Ward {ward + 1:00} • {house.TypeShort} {houseNumber:00}{(isSubdivision ? " (Subdivision)" : "")}");
+                ImGui.Text($"Price: {house.HousePrice:N0} gil");
+                ImGui.Text(house.IsOwned
+                    ? $"Owner: {house.EstateOwnerName}"
+                    : "Owner: (unowned)");
+                if (canTravelToPlot) {
+                    ImGui.Text("Right-click: Open menu");
+                } else if (canTeleportToDistrict) {
+                    var placeName = closestAetheryte.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
+                    ImGui.Text($"Right-click: Open menu ({placeName} fallback)");
+                }
+                ImGui.EndTooltip();
+            }
+
+            ImGui.NextColumn();
+        }
+
+        ImGui.Columns();
+
+        if (renderedCount == 0) {
+            ImGui.Spacing();
+            ImGui.Text("No houses match the current filters.");
+        }
+
+        ImGui.PopStyleVar(3);
     }
 
     private void DrawHousesInWard(int ward, Dictionary<int, List<Plugin.HouseInfoEntry>> seenWards)
@@ -469,19 +591,23 @@ public class MainWindow : Window
 
         var btnSize = new Vector2(78, 28);
         var canTeleportToDistrict = plugin.TryGetClosestAetheryte(selectedTerritoryId, out var closestAetheryte);
+        var canTravelToPlot = plugin.IsLifestreamIpcAvailable();
 
         var pale = new Vector4(0.12f, 0.58f, 0.95f, 1.0f); // bright azure (blue)
         var gold = new Vector4(0.75f, 0.28f, 0.90f, 1.0f); // magenta/purple (distinct from blue/green)
         var red = new Vector4(0.40f, 0.40f, 0.40f, 1.0f); // subdued gray (fallback)
 
         ImGui.Columns(4, $"HouseCols{ward}", false);
+        var renderedCount = 0;
 
         foreach (var house in ordered) {
             if (!ShouldShowHouse(house)) continue;
+            renderedCount++;
 
             var houseNumber = house.HouseNumber + 1;
             var isSubdivision = houseNumber > 30;
-            var houseLabel = $"{house.TypeShort} {houseNumber:00}";
+            var isFavorite = IsFavorite(selectedTerritoryId, ward, house.HouseNumber);
+            var houseLabel = $"{(isFavorite ? "* " : "")}{house.TypeShort} {houseNumber:00}";
 
             var houseColor = house.IsOwned ? red : house.TypeShort == "L" ? gold : house.TypeShort == "M" ? new Vector4(0.6f, 0.8f, 0.3f, 1.0f) : pale;
 
@@ -501,19 +627,20 @@ public class MainWindow : Window
 
             ImGui.PopStyleColor(3);
 
-            if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) {
-                if (!plugin.TryTeleportToClosestAetheryte(selectedTerritoryId)) {
-                    Svc.Chat.PrintError("Unable to teleport via Teleporter IPC.");
-                }
-            }
+            DrawHouseContextMenu($"WardHouse{selectedTerritoryId}_{ward}_{house.HouseNumber}", selectedTerritoryId, ward, house.HouseNumber);
 
             if (ImGui.IsItemHovered()) {
                 ImGui.BeginTooltip();
                 ImGui.Text($"{houseLabel}{(isSubdivision ? " (Subdivision)" : "")}");
                 ImGui.Text($"Price: {house.HousePrice:N0} gil");
-                if (canTeleportToDistrict) {
+                ImGui.Text(house.IsOwned
+                    ? $"Owner: {house.EstateOwnerName}"
+                    : "Owner: (unowned)");
+                if (canTravelToPlot) {
+                    ImGui.Text("Right-click: Open menu");
+                } else if (canTeleportToDistrict) {
                     var placeName = closestAetheryte.PlaceName.ValueNullable?.Name.ToString() ?? "Unknown";
-                    ImGui.Text($"Right-click: Teleport to {placeName}");
+                    ImGui.Text($"Right-click: Open menu ({placeName} fallback)");
                 }
                 ImGui.EndTooltip();
             }
@@ -522,7 +649,48 @@ public class MainWindow : Window
         }
 
         ImGui.Columns();
+
+        if (renderedCount == 0) {
+            ImGui.Spacing();
+            ImGui.Text("No houses match the current filters.");
+        }
+
         ImGui.PopStyleVar(3);
+    }
+
+    private void DrawHouseContextMenu(string popupId, uint territoryId, int ward, int houseNumber)
+    {
+        if (!ImGui.BeginPopupContextItem(popupId)) return;
+
+        if (ImGui.MenuItem("Teleport")) {
+            TeleportToHouse(territoryId, ward, houseNumber);
+        }
+
+        var isFavorite = IsFavorite(territoryId, ward, houseNumber);
+        if (ImGui.MenuItem(isFavorite ? "Unfavorite" : "Favorite")) {
+            ToggleFavorite(territoryId, ward, houseNumber);
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private void TeleportToHouse(uint territoryId, int ward, int houseNumber)
+    {
+        if (!plugin.TryTeleportToHousingAddressViaLifestream(territoryId, ward, houseNumber)
+            && !plugin.TryTeleportToClosestAetheryte(territoryId)) {
+            Svc.Chat.PrintError("Unable to travel via Lifestream or Teleporter IPC.");
+        }
+    }
+
+    private bool IsFavorite(uint territoryId, int ward, int houseNumber)
+    {
+        return favoriteHouses.Contains(new FavoriteHouseKey(plugin.CurrentWorldId ?? 0, territoryId, ward, houseNumber));
+    }
+
+    private void ToggleFavorite(uint territoryId, int ward, int houseNumber)
+    {
+        var key = new FavoriteHouseKey(plugin.CurrentWorldId ?? 0, territoryId, ward, houseNumber);
+        if (!favoriteHouses.Remove(key)) favoriteHouses.Add(key);
     }
 
     private int GetSelectedWard(uint territoryId)
@@ -553,7 +721,11 @@ public class MainWindow : Window
     private bool ShouldShowHouse(Plugin.HouseInfoEntry house)
     {
         var plotIndex = (house.HouseNumber % 30) + 1;
-        return plotNumberFilter[plotIndex - 1];
+        if (!plotNumberFilter[plotIndex - 1]) return false;
+        if (string.IsNullOrWhiteSpace(ownerNameFilter)) return true;
+
+        return !string.IsNullOrWhiteSpace(house.EstateOwnerName)
+               && house.EstateOwnerName.Contains(ownerNameFilter.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private void DrawHouseFilterControl(string label, Vector2 buttonSize)
@@ -686,4 +858,6 @@ public class MainWindow : Window
         CommandToggle,
         AddonSetupLifecycle
     }
+
+    private readonly record struct FavoriteHouseKey(uint WorldId, uint TerritoryId, int Ward, int HouseNumber);
 }

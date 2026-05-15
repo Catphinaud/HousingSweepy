@@ -2,6 +2,9 @@
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -11,12 +14,16 @@ using ECommons.Automation;
 using ECommons.Automation.NeoTaskManager;
 using ECommons.Commands;
 using ECommons.DalamudServices;
+using ECommons.GameFunctions;
 using ECommons.GameHelpers;
 using ECommons.Throttlers;
+using ECommons.UIHelpers.AddonMasterImplementations;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
-using VT = FFXIVClientStructs.FFXIV.Component.GUI.AtkValue;
+using VT = FFXIVClientStructs.FFXIV.Component.GUI.AtkValueType;
 
 namespace HousingSweepy;
 
@@ -24,6 +31,8 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/sweepy";
     private const byte AetheryteMapMarkerDataType = 3;
+    private const string ResidentialDistrictAethernetEntry = "Residential District Aethernet.";
+    private const string GoToSpecifiedWardEntry = "Go to specified ward. (Review Tabs)";
 
     public static TaskManager TaskManager = null!;
 
@@ -36,12 +45,14 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WardObserver wardObserver;
     private readonly MainWindow window;
     private readonly TeleportDebugWindow teleportDebugWindow;
+    private readonly TaskOverlayWindow taskOverlayWindow;
     internal readonly ExcelSheet<World> Worlds;
 
 
     internal bool _disposed;
 
     public bool IsScanningWards;
+    public bool ShowTaskOverlay;
 
     public WordTerritory? LastCommittedZoneAndWorld;
 
@@ -57,6 +68,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly ICallGateSubscriber<uint, byte, bool> teleporterTeleportIpc;
     private readonly ICallGateSubscriber<bool> teleporterChatMessageIpc;
+    private readonly ICallGateSubscriber<bool> lifestreamIsBusyIpc;
+    private readonly ICallGateSubscriber<string, object> lifestreamExecuteCommandIpc;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -65,6 +78,8 @@ public sealed class Plugin : IDalamudPlugin
 
         teleporterTeleportIpc = pluginInterface.GetIpcSubscriber<uint, byte, bool>("Teleport");
         teleporterChatMessageIpc = pluginInterface.GetIpcSubscriber<bool>("Teleport.ChatMessage");
+        lifestreamIsBusyIpc = pluginInterface.GetIpcSubscriber<bool>("Lifestream.IsBusy");
+        lifestreamExecuteCommandIpc = pluginInterface.GetIpcSubscriber<string, object>("Lifestream.ExecuteCommand");
 
         ECommonsMain.Init(pluginInterface, this);
         Territories = Svc.Data.GetExcelSheet<TerritoryType>();
@@ -84,6 +99,7 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem = new WindowSystem("HousingSweepy");
         _windowSystem.AddWindow(window = new MainWindow(this));
         _windowSystem.AddWindow(teleportDebugWindow = new TeleportDebugWindow(this));
+        _windowSystem.AddWindow(taskOverlayWindow = new TaskOverlayWindow(this));
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi += window.MarkOpenedViaCommandToggle;
         Svc.Commands.AddHandler(CommandName, new CommandInfo(OnCommand)
@@ -270,6 +286,294 @@ public sealed class Plugin : IDalamudPlugin
         return TryGetClosestAetheryte(territoryId, out var aetheryte) && TryTeleportViaIpc(aetheryte.RowId, 0);
     }
 
+    public bool TryOpenResidentialDistrictAethernet(uint cityTerritoryId)
+    {
+        if (TaskManager.IsBusy) {
+            IsScanningWards = false;
+            StopNext = false;
+            WardsToScan.Clear();
+            TaskManager.Abort();
+        }
+
+        if (!TryGetClosestAetheryte(cityTerritoryId, out _)) return false;
+
+        ShowTaskOverlay = true;
+        if (IsHousingSelectBlockVisible()) {
+            var selectNothingAttempts = new int[1];
+            TaskManager.Enqueue(CloseHousingSelectBlock, "Close HousingSelectBlock");
+            TaskManager.EnqueueDelay(500);
+            TaskManager.Enqueue(WaitForNothingEntry, "Wait for Nothing.", new(timeLimitMS: 30000));
+            TaskManager.Enqueue(() => SelectNothingEntry(selectNothingAttempts), "Select Nothing.", new(timeLimitMS: 30000));
+        }
+
+        TaskManager.Enqueue(() => TeleportToCityAetheryteIfNeeded(cityTerritoryId), "Teleport to city aetheryte");
+        TaskManager.Enqueue(() => IsInTerritoryAndReady(cityTerritoryId), "Wait for city aetheryte arrival", new(timeLimitMS: 120000));
+        TaskManager.Enqueue(TargetReachableAetheryte, "Target city aetheryte", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(LockOnTarget, "Lock on city aetheryte", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(EnableAutomove, "Enable automove", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(WaitUntilCloseToTarget, "Wait until close to city aetheryte", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(DisableAutomove, "Disable automove", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(DisableLockOn, "Disable lock on", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(InteractWithTargetedAetheryte, "Interact with city aetheryte", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(WaitForResidentialDistrictAethernet, "Wait for Residential District Aethernet", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(SelectResidentialDistrictAethernet, "Select Residential District Aethernet", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(WaitForGoToSpecifiedWard, "Wait for Go to specified ward", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(SelectGoToSpecifiedWard, "Select Go to specified ward", new(timeLimitMS: 30000));
+        TaskManager.Enqueue(() => ShowTaskOverlay = false, "Hide task overlay");
+        return true;
+    }
+
+    private bool TeleportToCityAetheryteIfNeeded(uint cityTerritoryId)
+    {
+        var currentTerritory = (uint)Svc.ClientState.TerritoryType;
+        var alreadyNearTargetAetheryte = currentTerritory == cityTerritoryId && IsNearReachableAetheryte(30f);
+        return alreadyNearTargetAetheryte
+               || (EzThrottler.Throttle("HousingSweepy.TeleportToCityAetheryte", 1000)
+                   && TryTeleportToClosestAetheryte(cityTerritoryId));
+    }
+
+    private static bool IsNearReachableAetheryte(float maxDistance)
+    {
+        var player = Svc.Objects.LocalPlayer;
+        if (player == null) return false;
+
+        return Svc.Objects.Any(obj => obj.ObjectKind == ObjectKind.Aetheryte
+                                      && obj.IsTargetable
+                                      && Vector3.Distance(player.Position, obj.Position) <= maxDistance);
+    }
+
+    private static bool IsInTerritoryAndReady(uint territoryId)
+    {
+        return Svc.Objects.LocalPlayer != null
+               && Svc.ClientState.TerritoryType == territoryId
+               && !Svc.Condition[ConditionFlag.BetweenAreas]
+               && !Svc.Condition[ConditionFlag.BetweenAreas51];
+    }
+
+    public bool IsLifestreamIpcAvailable()
+    {
+        try {
+            _ = lifestreamIsBusyIpc.InvokeFunc();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    public bool TryTeleportToHousingAddressViaLifestream(uint territoryId, int ward, int plot)
+    {
+        if (ward < 0 || ward > 29 || plot < 0 || plot > 59) return false;
+        if (!IsLifestreamIpcAvailable()) return false;
+        if (CurrentWorldName is not { Length: > 0 } worldName) return false;
+
+        var territory = residentialTerritories.FirstOrDefault(t => t.TerritoryId == territoryId);
+        if (territory.TerritoryId == 0) {
+            EnsureResidentialTerritory(territoryId);
+            territory = residentialTerritories.FirstOrDefault(t => t.TerritoryId == territoryId);
+        }
+
+        if (territory.TerritoryId == 0) return false;
+
+        var address = $"{worldName}, {territory.PlaceName}, W{ward + 1}, P{plot + 1}";
+
+        if (IsHousingSelectBlockVisible()) {
+            var selectNothingAttempts = new int[1];
+            TaskManager.Enqueue(CloseHousingSelectBlock, "Close HousingSelectBlock");
+            TaskManager.EnqueueDelay(500);
+            TaskManager.Enqueue(WaitForSelectString, "Wait for SelectString");
+            TaskManager.Enqueue(() => SelectNothingEntry(selectNothingAttempts), "Select Nothing.");
+            TaskManager.Enqueue(() => ExecuteLifestreamAddress(address), "Travel to housing address");
+            return true;
+        }
+
+        return ExecuteLifestreamAddress(address);
+    }
+
+    private bool ExecuteLifestreamAddress(string address)
+    {
+        try {
+            if (lifestreamIsBusyIpc.InvokeFunc()) {
+                Svc.Chat.PrintError("Lifestream is busy.");
+                return true;
+            }
+
+            lifestreamExecuteCommandIpc.InvokeAction(address);
+            return true;
+        } catch (Exception ex) {
+            Svc.Log.Warning(ex, "Lifestream IPC call failed.");
+            return false;
+        }
+    }
+
+    private static bool IsHousingSelectBlockVisible()
+    {
+        var addon = Svc.GameGui.GetAddonByName("HousingSelectBlock");
+        return addon.IsVisible;
+    }
+
+    private static unsafe void CloseHousingSelectBlock()
+    {
+        var addon = Svc.GameGui.GetAddonByName("HousingSelectBlock");
+        if (addon.IsVisible) Callback.Fire((AtkUnitBase*)addon.Address, true, -1);
+    }
+
+    private static bool WaitForSelectString()
+    {
+        var addon = Svc.GameGui.GetAddonByName("SelectString");
+        return addon.IsVisible;
+    }
+
+    private static bool WaitForNothingEntry()
+    {
+        return TryGetSelectStringEntry("Nothing.", out _);
+    }
+
+    private static bool TargetReachableAetheryte()
+    {
+        if (Svc.Objects.LocalPlayer == null) return false;
+        var aetheryte = GetReachableAetheryte();
+        if (aetheryte == null) return false;
+        if (Svc.Targets.Target?.Address == aetheryte.Address) return true;
+
+        if (!EzThrottler.Throttle("HousingSweepy.TargetReachableAetheryte", 200)) return false;
+
+        Svc.Targets.Target = aetheryte;
+        return true;
+    }
+
+    private static unsafe bool InteractWithTargetedAetheryte()
+    {
+        if (Svc.Objects.LocalPlayer == null) return false;
+        var aetheryte = GetReachableAetheryte();
+        if (aetheryte == null || Svc.Targets.Target?.Address != aetheryte.Address) return false;
+        if (!EzThrottler.Throttle("HousingSweepy.InteractWithTargetedAetheryte", 500)) return false;
+
+        TargetSystem.Instance()->InteractWithObject(aetheryte.Struct(), false);
+        return true;
+    }
+
+    private static bool LockOnTarget()
+    {
+        if (Svc.Objects.LocalPlayer == null || Svc.Targets.Target == null) return false;
+        if (EzThrottler.Throttle("HousingSweepy.LockOnAetheryte", 200)) {
+            Chat.SendMessage("/lockon");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool EnableAutomove()
+    {
+        if (Svc.Objects.LocalPlayer == null) return false;
+        if (EzThrottler.Throttle("HousingSweepy.EnableAutomove", 200)) {
+            Chat.SendMessage("/automove on");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool WaitUntilCloseToTarget()
+    {
+        var player = Svc.Objects.LocalPlayer;
+        var target = Svc.Targets.Target;
+        return player != null && target != null && Vector3.Distance(player.Position, target.Position) <= 9f;
+    }
+
+    private static bool DisableAutomove()
+    {
+        if (Svc.Objects.LocalPlayer == null) return false;
+        if (EzThrottler.Throttle("HousingSweepy.DisableAutomove", 200)) {
+            Chat.SendMessage("/automove off");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool DisableLockOn()
+    {
+        if (Svc.Objects.LocalPlayer == null) return false;
+        if (EzThrottler.Throttle("HousingSweepy.DisableLockOn", 200)) {
+            Chat.SendMessage("/lockon off");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static unsafe bool SelectResidentialDistrictAethernet()
+    {
+        if (!TryGetSelectStringEntry(ResidentialDistrictAethernetEntry, out var entry)) return false;
+        if (!EzThrottler.Throttle("HousingSweepy.SelectResidentialDistrictAethernet", 500)) return false;
+
+        entry.Select();
+        return true;
+    }
+
+    private static bool WaitForResidentialDistrictAethernet()
+    {
+        return TryGetSelectStringEntry(ResidentialDistrictAethernetEntry, out _);
+    }
+
+    private static unsafe bool SelectGoToSpecifiedWard()
+    {
+        if (!TryGetSelectStringEntry(GoToSpecifiedWardEntry, out var entry)) return false;
+        if (!EzThrottler.Throttle("HousingSweepy.SelectGoToSpecifiedWard", 500)) return false;
+
+        entry.Select();
+        return true;
+    }
+
+    private static bool WaitForGoToSpecifiedWard()
+    {
+        return TryGetSelectStringEntry(GoToSpecifiedWardEntry, out _);
+    }
+
+    private static IGameObject? GetReachableAetheryte()
+    {
+        var player = Svc.Objects.LocalPlayer;
+        if (player == null) return null;
+
+        return Svc.Objects
+            .Where(obj => obj.ObjectKind == ObjectKind.Aetheryte && obj.IsTargetable)
+            .OrderBy(obj => Vector3.DistanceSquared(player.Position, obj.Position))
+            .FirstOrDefault(obj => Vector3.Distance(player.Position, obj.Position) < 30f);
+    }
+
+    private static unsafe bool TryGetSelectStringEntry(string text, out AddonMaster.SelectString.Entry entry)
+    {
+        entry = default;
+
+        var addon = Svc.GameGui.GetAddonByName("SelectString");
+        if (!addon.IsVisible) return false;
+
+        var selectString = new AddonMaster.SelectString((AddonSelectString*)addon.Address);
+        if (!selectString.IsAddonReady) return false;
+
+        foreach (var candidate in selectString.Entries) {
+            if (!candidate.Text.Equals(text, StringComparison.OrdinalIgnoreCase)
+                && !candidate.Text.EndsWith(text, StringComparison.OrdinalIgnoreCase)) continue;
+
+            entry = candidate;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static unsafe bool SelectNothingEntry(int[] attempts)
+    {
+        attempts[0]++;
+
+        if (!TryGetSelectStringEntry("Nothing.", out var entry)) return attempts[0] >= 3;
+        if (!EzThrottler.Throttle("HousingSweepy.SelectNothing", 500)) return false;
+
+        entry.Select();
+        return true;
+    }
+
     public bool TryGetCityTerritoryId(string tabLabel, out uint territoryId)
     {
         switch (tabLabel)
@@ -379,6 +683,17 @@ public sealed class Plugin : IDalamudPlugin
             Type = NotificationType.Success,
             Content = "Seen houses have been reset."
         });
+    }
+
+    public void CancelCurrentTasks()
+    {
+        IsScanningWards = false;
+        ShowTaskOverlay = false;
+        StopNext = false;
+        WardsToScan.Clear();
+        TaskManager.Abort();
+        Chat.SendMessage("/automove off");
+        Chat.SendMessage("/lockon off");
     }
 
     // Maybe one should remove this but I had it for debugging but removed the code in it...
@@ -624,7 +939,7 @@ public sealed class Plugin : IDalamudPlugin
         };
     }
 
-    public record HouseInfoEntry(ushort HouseNumber, uint HousePrice, bool IsOwned)
+    public record HouseInfoEntry(ushort HouseNumber, uint HousePrice, bool IsOwned, string EstateOwnerName = "")
     {
         public string TypeShort => HousePrice switch
         {
